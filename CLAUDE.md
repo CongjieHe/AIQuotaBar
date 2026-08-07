@@ -42,19 +42,26 @@ A native macOS menu bar app (Python + rumps) that shows live Claude, ChatGPT, Cu
 
 ## Architecture
 
-Single file: `claude_bar.py` (~900 lines). No build step. No framework.
+Python package `aiquotabar/` with a thin `claude_bar.py` entry point. No build step. No framework.
 
 ```
-claude_bar.py
-├── Config         load_config / save_config  (~/.claude_bar_config.json)
-├── Claude API     fetch_raw → _get / _org_id_from_api
-├── Provider APIs  fetch_openai / fetch_minimax / fetch_glm → ProviderData
-│                  PROVIDER_REGISTRY: cfg_key → (name, fetch_fn)
-├── Parser         parse_usage → UsageData(session, weekly_all, weekly_sonnet)
-├── Display        _bar / _status_icon / _row_lines / _provider_lines
-├── Cookie mgmt    _auto_detect_cookies → browser-cookie3 (Firefox first, then Chromium)
-└── App            ClaudeBar(rumps.App) — timer, menu rebuild, callbacks
+aiquotabar/
+├── config.py     load_config / save_config  (~/.claude_bar_config.json)
+├── providers.py  Claude API (fetch_raw), fetch_chatgpt / fetch_cursor / fetch_copilot /
+│                 fetch_openai / fetch_minimax / fetch_glm → ProviderData
+│                 PROVIDER_REGISTRY: cfg_key → (name, fetch_fn); COOKIE_PROVIDERS auto-detect
+│                 Cookie mgmt: _auto_detect_*_cookies → browser-cookie3 (crash-safe subprocess)
+├── ui.py         ClaudeBar(rumps.App) — timer, menu rebuild, bar title, callbacks
+├── history.py    SQLite usage history (~/Library/Application Support/AIQuotaBar/history.db)
+├── widget.py     _write_widget_cache → usage.json for the WidgetKit widget
+└── update.py     update check
 ```
+
+Note: Cursor's `usage-summary` API has two response shapes — individual plans return
+`individualUsage.plan.*PercentUsed`; enterprise/team plans have no `plan` block and
+`fetch_cursor` shows only the member's own quota from `individualUsage.overall`
+(`used`/`limit` are in USD cents). Team-wide pools (`teamUsage`) are deliberately
+not displayed — they are not the user's personal limit.
 
 ## Widget (optional)
 
@@ -106,7 +113,8 @@ Response fields:
 
 | File            | Purpose                                              |
 |-----------------|------------------------------------------------------|
-| `claude_bar.py` | Entire application                                   |
+| `claude_bar.py` | Entry point (imports `aiquotabar`)                   |
+| `aiquotabar/`   | Application package (see Architecture)               |
 | `install.sh`    | One-line curl installer (detects Python, LaunchAgent)|
 | `requirements.txt` | `rumps`, `curl_cffi`, `browser-cookie3`           |
 | `setup.sh`      | Legacy manual installer (kept for reference)         |
@@ -160,6 +168,15 @@ pkill -f claude_bar.py; sleep 1; python3 claude_bar.py &
 ```
 
 ## Do not
+
+- Do not write `@Parameter(default: .none)` in the widget's AppIntents code — the
+  `default:` argument is Optional, so bare `.none` means Optional.none (no default),
+  the intent fails to instantiate, and the widget is permanently stuck on its
+  redacted placeholder. Always qualify: `default: AIProvider.none`.
+- Do not leave xcodebuild output registered with LaunchServices — the build step
+  auto-runs `lsregister -trusted` on the build-dir app, creating a duplicate widget
+  registration that fights the /Applications copy (pluginUUID flapping in chronod).
+  After installing, `lsregister -u` the build-dir bundle and delete it.
 
 - Do not add a `session_key` field — the app uses full cookie strings, not just the session key.
 - Do not multiply utilization values by 100 — all fields now return 0–100 percentages directly.
