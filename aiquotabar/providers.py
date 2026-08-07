@@ -215,10 +215,12 @@ def parse_usage(raw: dict) -> UsageData:
     extra = u.get("extra_usage")
     overages = bool(extra) if extra is not None else None
 
+    # Short window labels ("5H"/"7D") — long names get truncated in the
+    # menu and widget, and the API field names already encode the window.
     return UsageData(
-        session=_row(u, "five_hour", "Current Session"),
-        weekly_all=_row(u, "seven_day", "All Models"),
-        weekly_sonnet=_row(u, "seven_day_sonnet", "Sonnet Only"),
+        session=_row(u, "five_hour", "5H"),
+        weekly_all=_row(u, "seven_day", "7D"),
+        weekly_sonnet=_row(u, "seven_day_sonnet", "7D Sonnet"),
         overages_enabled=overages,
         raw=raw,
     )
@@ -245,44 +247,64 @@ def _chatgpt_access_token(cookies: dict) -> str | None:
     return data.get("accessToken")
 
 
-def _parse_wham_window(window: dict, label: str) -> LimitRow | None:
-    """Parse a single rate-limit window dict into a LimitRow."""
+def _window_duration_label(window: dict) -> str:
+    """'5H' / '7D' style label from a window's limit_window_seconds."""
+    secs = window.get("limit_window_seconds")
+    if not secs:
+        return ""
+    if secs % 86400 == 0:
+        return f"{secs // 86400}D"
+    if secs % 3600 == 0:
+        return f"{secs // 3600}H"
+    return f"{secs // 60}M"
+
+
+def _parse_wham_window(window: dict | None, label_prefix: str = "") -> LimitRow | None:
+    """Parse one primary/secondary window dict into a LimitRow.
+
+    Label is the window duration ("5H"/"7D"), optionally prefixed with a
+    short bucket name for non-default buckets ("Review 7D", "Spark 7D").
+    """
     if not window or not isinstance(window, dict):
         return None
-    pw = window.get("primary_window") or {}
-    pct = min(100, int(pw.get("used_percent", 0)))
-    reset_str = _fmt_reset(pw.get("reset_at")) if pw.get("reset_at") else ""
+    pct = min(100, int(window.get("used_percent", 0)))
+    reset_str = _fmt_reset(window.get("reset_at")) if window.get("reset_at") else ""
+    label = " ".join(p for p in [label_prefix, _window_duration_label(window)] if p) or "Usage"
     return LimitRow(label, pct, reset_str)
 
 
 def _parse_wham_usage(data: dict) -> ProviderData:
     """Parse /backend-api/wham/usage response.
 
-    Confirmed shape (2026-02):
-      rate_limit.primary_window.used_percent  (0-100)
-      rate_limit.primary_window.reset_at      (Unix timestamp)
-      code_review_rate_limit  -- same structure
+    Confirmed shape (2026-08):
+      rate_limit.primary_window.{used_percent, limit_window_seconds, reset_at}
+      rate_limit.secondary_window            -- same shape or null
+      code_review_rate_limit                 -- same structure or null
+      additional_rate_limits[].limit_name    -- e.g. "GPT-5.3-Codex-Spark"
+      additional_rate_limits[].rate_limit    -- same structure
     """
     log.debug("wham/usage raw: %s", json.dumps(data, indent=2))
 
     rows: list[LimitRow] = []
 
-    label_map = {
-        "rate_limit":            "Codex Tasks",
-        "code_review_rate_limit": "Code Review",
-    }
-    for key, label in label_map.items():
-        row = _parse_wham_window(data.get(key), label)
-        if row is not None:
-            rows.append(row)
-
-    # additional_rate_limits may be a list of extra buckets
-    for extra in (data.get("additional_rate_limits") or []):
-        if isinstance(extra, dict):
-            name = extra.get("name") or extra.get("type") or "Extra"
-            row = _parse_wham_window(extra, name.replace("_", " ").title())
-            if row:
+    def _add_bucket(container: dict | None, prefix: str = ""):
+        if not isinstance(container, dict):
+            return
+        for w in (container.get("primary_window"), container.get("secondary_window")):
+            row = _parse_wham_window(w, prefix)
+            if row is not None:
                 rows.append(row)
+
+    _add_bucket(data.get("rate_limit"))
+    _add_bucket(data.get("code_review_rate_limit"), "Review")
+
+    for extra in (data.get("additional_rate_limits") or []):
+        if not isinstance(extra, dict):
+            continue
+        name = extra.get("limit_name") or extra.get("name") or "Extra"
+        # "GPT-5.3-Codex-Spark" -> "Spark": keep only the last dash-token
+        short = name.rsplit("-", 1)[-1].replace("_", " ").strip().title() or "Extra"
+        _add_bucket(extra.get("rate_limit") or extra, short)
 
     if not rows:
         return ProviderData("ChatGPT", error="No rate limit data in response")
@@ -407,10 +429,8 @@ def fetch_cursor(cookie_str: str) -> ProviderData:
         r.raise_for_status()
         data = r.json()
         log.debug("cursor usage-summary: %s", json.dumps(data, indent=2))
-        plan = (data.get("individualUsage") or {}).get("plan") or {}
-        auto_pct = int(round(float(plan.get("autoPercentUsed", 0))))
-        api_pct = int(round(float(plan.get("apiPercentUsed", 0))))
-        total_pct = int(round(float(plan.get("totalPercentUsed", 0))))
+        individual = data.get("individualUsage") or {}
+        plan = individual.get("plan") or {}
         # Build reset string from billingCycleEnd
         reset_str = ""
         cycle_end = data.get("billingCycleEnd")
@@ -427,10 +447,28 @@ def fetch_cursor(cookie_str: str) -> ProviderData:
                         reset_str = f"resets in {hours}h"
             except (ValueError, TypeError):
                 pass
-        rows = [
-            LimitRow(label="Auto", pct=auto_pct, reset_str=reset_str),
-            LimitRow(label="API", pct=api_pct, reset_str=reset_str),
-        ]
+        if plan:
+            # Individual plan: percentages come pre-computed
+            auto_pct = int(round(float(plan.get("autoPercentUsed", 0))))
+            api_pct = int(round(float(plan.get("apiPercentUsed", 0))))
+            total_pct = int(round(float(plan.get("totalPercentUsed", 0))))
+            rows = [
+                LimitRow(label="Auto", pct=auto_pct, reset_str=reset_str),
+                LimitRow(label="API", pct=api_pct, reset_str=reset_str),
+            ]
+        else:
+            # Enterprise/team plan: no "plan" block. Show only the member's own
+            # quota (individualUsage.overall, amounts in cents) — team-wide
+            # pools are not this user's limit.
+            overall = individual.get("overall") or {}
+            used, limit = overall.get("used"), overall.get("limit")
+            if not limit:
+                return ProviderData("Cursor", error="No usage data in response")
+            used = float(used or 0)
+            total_pct = min(100, int(round(used / float(limit) * 100)))
+            # Whole dollars, no spaces — fits the widget's 3-column layout
+            label = f"${used / 100:,.0f}/${float(limit) / 100:,.0f}"
+            rows = [LimitRow(label=label, pct=total_pct, reset_str=reset_str)]
         pd = ProviderData("Cursor", spent=float(total_pct), limit=100.0, currency="")
         pd._rows = rows
         return pd

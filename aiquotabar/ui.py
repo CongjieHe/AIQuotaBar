@@ -2031,10 +2031,17 @@ class ClaudeBar(rumps.App):
                     items.append(None)
 
 
-        # -- CHATGPT section (if detected) ------------------------------------
+        # -- CHATGPT section (if detected or explicitly chosen) ---------------
+        chosen_bar = self.config.get("bar_providers") or []
         chatgpt_pd = next(
             (pd for pd in self._provider_data if pd.name == "ChatGPT"), None
         )
+        if chatgpt_pd is None and "ChatGPT" in chosen_bar:
+            items.append(_section_header_mi("  ChatGPT", "chatgpt_icon_clean.png",
+                                            "#74AA9C", icon_tint="#74AA9C"))
+            items.append(_mi("  ⚠️  Not logged in — sign in at chatgpt.com"))
+            items.append(_mi("  in your browser, then Refresh"))
+            items.append(None)
         if chatgpt_pd:
             items.append(_section_header_mi("  ChatGPT", "chatgpt_icon_clean.png",
                                             "#74AA9C", icon_tint="#74AA9C"))
@@ -2065,10 +2072,15 @@ class ClaudeBar(rumps.App):
                         items.append(_mi(line))
                 items.append(None)
 
-        # -- COPILOT section (if detected) ------------------------------------
+        # -- COPILOT section (if detected or explicitly chosen) ---------------
         copilot_pd = next(
             (pd for pd in self._provider_data if pd.name == "Copilot"), None
         )
+        if copilot_pd is None and "Copilot" in chosen_bar:
+            items.append(_section_header_mi("  GitHub Copilot", "copilot.png", "#6E40C9", icon_tint="#9B6BFF"))
+            items.append(_mi("  ⚠️  Not logged in — sign in at github.com"))
+            items.append(_mi("  in your browser, then Refresh"))
+            items.append(None)
         if copilot_pd:
             items.append(_section_header_mi("  GitHub Copilot", "copilot.png", "#6E40C9", icon_tint="#9B6BFF"))
             for line in _provider_lines(copilot_pd):
@@ -2090,10 +2102,15 @@ class ClaudeBar(rumps.App):
                 items.append(_mi(f"  Hit limit {hits}x this week"))
             items.append(None)
 
-        # -- CURSOR section (if detected) -------------------------------------
+        # -- CURSOR section (if detected or explicitly chosen) ----------------
         cursor_pd = next(
             (pd for pd in self._provider_data if pd.name == "Cursor"), None
         )
+        if cursor_pd is None and "Cursor" in chosen_bar:
+            items.append(_section_header_mi("  Cursor", "cursor.png", "#00A0D1", icon_tint="#00A0D1"))
+            items.append(_mi("  ⚠️  Not logged in — sign in at cursor.com"))
+            items.append(_mi("  in your browser, then Refresh"))
+            items.append(None)
         if cursor_pd:
             items.append(_section_header_mi("  Cursor", "cursor.png", "#00A0D1", icon_tint="#00A0D1"))
             rows = getattr(cursor_pd, "_rows", None)
@@ -2737,12 +2754,13 @@ class ClaudeBar(rumps.App):
         "Copilot": {"icon": "copilot.png",            "tint": "#8CBFF3", "color": "#8CBFF3", "sym": "\u25c6"},
     }
 
-    def _set_bar_title(self, provider_segments: list[tuple[str, int, str]],
+    def _set_bar_title(self, provider_segments: list[tuple[str, int | None, str]],
                        cc_msgs: int | None = None):
         """Multi-indicator attributed title with brand logo icons.
 
         provider_segments: list of (provider_name, pct, extra_suffix)
           e.g. [("Claude", 36, " \u00b7"), ("ChatGPT", 12, "")]
+        pct=None renders an en-dash placeholder (provider chosen but no data).
 
         Falls back to colored text symbols if AppKit / icons unavailable.
         """
@@ -2783,8 +2801,9 @@ class ClaudeBar(rumps.App):
                     seg.addAttribute_value_range_(NSForegroundColorAttributeName, color, (0, len(sym)))
                     s.appendAttributedString_(seg)
 
+                pct_str = f"{pct}%" if pct is not None else "–"
                 s.appendAttributedString_(
-                    NSAttributedString.alloc().initWithString_attributes_(f" {pct}%{suffix}", base)
+                    NSAttributedString.alloc().initWithString_attributes_(f" {pct_str}{suffix}", base)
                 )
 
             # -- Claude Code  diamond 3.2k --
@@ -2805,7 +2824,8 @@ class ClaudeBar(rumps.App):
         for name, pct, suffix in provider_segments:
             cfg = self._BAR_PROVIDERS.get(name, {})
             sym = cfg.get("sym", "\u25cf")
-            parts.append(f"{sym} {pct}%{suffix}")
+            pct_str = f"{pct}%" if pct is not None else "\u2013"
+            parts.append(f"{sym} {pct_str}{suffix}")
         if cc_msgs is not None and cc_msgs > 0:
             parts.append(f"\u25c6 {_fmt_count(cc_msgs)}")
         self.title = "  ".join(parts)
@@ -2845,7 +2865,12 @@ class ClaudeBar(rumps.App):
             # User-configured bar providers, or auto top 2 by priority
             chosen = self.config.get("bar_providers")
             if chosen:
-                segments = [available[n] for n in chosen if n in available]
+                # Explicitly chosen providers always get a slot; ones with no
+                # data yet (not logged in / fetch error) show a "–" placeholder.
+                segments = [
+                    available.get(n, (n, None, ""))
+                    for n in chosen if n in self._BAR_PROVIDERS
+                ]
             else:
                 segments = [available[n] for n in self._BAR_PRIORITY
                             if n in available][:2]
