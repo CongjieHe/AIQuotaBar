@@ -12,13 +12,13 @@ struct QuotaEntry: TimelineEntry {
             version: 1,
             updatedAt: ISO8601DateFormatter().string(from: .now),
             claude: ClaudeUsage(
-                session: LimitRow(label: "Current Session", pct: 36, resetStr: "resets in 2h 14m"),
-                weeklyAll: LimitRow(label: "All Models", pct: 83, resetStr: "resets Wed 23:00"),
+                session: LimitRow(label: "5H", pct: 36, resetStr: "resets in 2h 14m"),
+                weeklyAll: LimitRow(label: "7D", pct: 83, resetStr: "resets Wed 23:00"),
                 weeklySonnet: nil,
                 overagesEnabled: false
             ),
             chatgpt: ChatGPTUsage(
-                rows: [LimitRow(label: "Codex Tasks", pct: 12, resetStr: "resets Thu 05:38")],
+                rows: [LimitRow(label: "7D", pct: 12, resetStr: "resets Thu 05:38")],
                 error: nil
             ),
             claudeCode: ClaudeCodeUsage(todayMessages: 42, weekMessages: 312),

@@ -14,59 +14,86 @@ struct MediumWidgetView: View {
         }
     }
 
+    // One horizontal row per provider, providers stacked vertically.
     private func contentView(_ snap: UsageSnapshot) -> some View {
         let providers = entry.providers
-        let maxRows = providers.count > 2 ? 2 : 3
+        let compact = providers.count > 3
 
-        return HStack(spacing: 0) {
+        return VStack(spacing: 0) {
             ForEach(Array(providers.enumerated()), id: \.offset) { idx, provider in
                 if idx > 0 {
                     Rectangle()
                         .fill(.quaternary)
-                        .frame(width: 1)
-                        .padding(.vertical, 2)
+                        .frame(height: 1)
                 }
-                providerColumn(snap: snap, provider: provider, maxRows: maxRows)
-                    .padding(.leading, idx > 0 ? 10 : 0)
-                    .padding(.trailing, idx < providers.count - 1 ? 10 : 0)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                providerRow(snap: snap, provider: provider, showReset: !compact)
+                    .frame(maxHeight: .infinity)
             }
         }
     }
 
-    private func providerColumn(snap: UsageSnapshot, provider: AIProvider, maxRows: Int) -> some View {
+    private func providerRow(snap: UsageSnapshot, provider: AIProvider, showReset: Bool) -> some View {
         let data = provider.displayData(from: snap)
-        return VStack(alignment: .leading, spacing: 10) {
+        return HStack(alignment: .center, spacing: 12) {
             HStack(spacing: 6) {
-                providerIcon(provider, size: 22)
+                providerIcon(provider, size: 16)
                 Text(provider.displayName)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(provider.color)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
+            .frame(width: 90, alignment: .leading)
 
             if let error = data.error {
                 Text(error)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else if data.isConfigured {
-                ForEach(data.rows.prefix(maxRows), id: \.label) { row in
-                    limitRow(row, accent: provider.color)
-                }
-                if let extra = data.extraInfo {
-                    HStack(spacing: 3) {
-                        Image(systemName: "terminal")
-                            .font(.system(size: 8))
-                        Text(extra)
-                            .font(.system(size: 10))
-                    }
-                    .foregroundStyle(provider.color.opacity(0.7))
+                ForEach(data.rows.prefix(2), id: \.label) { row in
+                    limitSegment(row, accent: provider.color, showReset: showReset)
                 }
             } else {
                 Text("Not set up")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        .padding(.vertical, 4)
+    }
+
+    private func limitSegment(_ row: LimitRow, accent: Color, showReset: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(row.label)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 3)
+                Text("\(row.pct)%")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(colorForPct(row.pct, accent: accent))
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.quaternary)
+                    Capsule()
+                        .fill(colorForPct(row.pct, accent: accent).opacity(0.85))
+                        .frame(width: max(2, geo.size.width * CGFloat(row.pct) / 100))
+                }
+            }
+            .frame(height: 3)
+            if showReset && !row.resetStr.isEmpty {
+                Text(row.resetStr)
+                    .font(.system(size: 8))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity)
     }
 
     @ViewBuilder
@@ -83,35 +110,6 @@ struct MediumWidgetView: View {
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(width: size, height: size)
-        }
-    }
-
-    private func limitRow(_ row: LimitRow, accent: Color) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(row.label)
-                    .font(.system(size: 12))
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                Text("\(row.pct)%")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(colorForPct(row.pct, accent: accent))
-            }
-
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(.quaternary)
-                    Capsule()
-                        .fill(colorForPct(row.pct, accent: accent).opacity(0.85))
-                        .frame(width: max(2, geo.size.width * CGFloat(row.pct) / 100))
-                }
-            }
-            .frame(height: 4)
-
-            Text(row.resetStr)
-                .font(.system(size: 9))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
         }
     }
 

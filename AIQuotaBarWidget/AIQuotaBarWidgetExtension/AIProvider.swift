@@ -71,10 +71,15 @@ struct SelectProvidersIntent: WidgetConfigurationIntent {
     @Parameter(title: "Provider 2", default: .chatgpt)
     var provider2: AIProvider
 
-    @Parameter(title: "Provider 3", default: .none)
+    // NOTE: must be written as `AIProvider.none`, not `.none` — the `default:`
+    // argument is Optional, so a bare `.none` resolves to Optional.none (no
+    // default at all) and AppIntents then fails to instantiate the intent
+    // ("needs to disambiguate a parameter value"), leaving the widget stuck
+    // on its redacted placeholder forever.
+    @Parameter(title: "Provider 3", default: AIProvider.none)
     var provider3: AIProvider
 
-    @Parameter(title: "Provider 4", default: .none)
+    @Parameter(title: "Provider 4", default: AIProvider.none)
     var provider4: AIProvider
 
     /// Active (non-none) providers in order.

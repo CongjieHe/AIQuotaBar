@@ -37,6 +37,7 @@ Icon?
 # Xcode build artifacts
 AIQuotaBarWidget/build/
 AIQuotaBarWidget/build_*/
+AIQuotaBarWidget/build-*/
 xcuserdata/
 *.xcuserstate
 
