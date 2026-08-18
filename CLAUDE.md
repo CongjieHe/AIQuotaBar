@@ -63,6 +63,13 @@ Note: Cursor's `usage-summary` API has two response shapes — individual plans 
 (`used`/`limit` are in USD cents). Team-wide pools (`teamUsage`) are deliberately
 not displayed — they are not the user's personal limit.
 
+Note: ChatGPT's `wham/usage` returns `additional_rate_limits[]` — per-model side
+buckets alongside the main `rate_limit`. `_WHAM_HIDDEN_LIMITS` in `providers.py`
+filters these by `limit_name` substring; "spark" is hidden because Codex-Spark is a
+speed-optimised preview model that is never the user's real ceiling. Filtering at
+`_parse_wham_usage` covers the menu, the bar, the share card and the widget at once —
+they all read `pd._rows`.
+
 ## Widget (optional)
 
 A native macOS WidgetKit widget in `AIQuotaBarWidget/` shows usage on the desktop.
@@ -70,8 +77,20 @@ A native macOS WidgetKit widget in `AIQuotaBarWidget/` shows usage on the deskto
 **Data flow:** `claude_bar.py` → `~/Library/Application Support/AIQuotaBar/usage.json` → WidgetKit reads it.
 
 - `_write_widget_cache()` runs after every fetch cycle (atomic write, never crashes main app)
-- Widget refreshes every 15 min via `TimelineProvider`
-- Shows stale indicator if data is >30 min old
+- It then runs `open -n -g -a AIQuotaBarHost --args --reload-widget` to nudge WidgetKit.
+  The `-n` is required: plain `open` only activates an already-running host, so the
+  `--reload-widget` arg would never reach it if any instance is lingering.
+  `AIQuotaBarHostApp.init()` handles that flag by reloading timelines and calling
+  `exit(0)` **before** the `WindowGroup` is built — otherwise every refresh cycle
+  leaves a stray host window on the user's desktop.
+- Widget refreshes every 5 min via `TimelineProvider` (matches the app's fetch cycle)
+- Shows a "stale" badge (dimmed content + age) when the cache is >30 min old.
+  `isStale` was computed but never rendered for a long time, which is how a
+  9-day-old snapshot passed for live data — keep the badge wired to the views.
+- The Swift side must track `usage.json` schema additions: `ClaudeUsage.scoped`
+  mirrors `UsageData.scoped`. New keys are optional in Swift so an older cache
+  still decodes; a *missing* non-optional key makes `JSONDecoder` return nil and
+  the widget silently falls back to "no data".
 - Small widget: circular gauge (Claude session %). Medium: side-by-side bars
 - Requires Xcode 15+ to build; entirely optional — menu bar app works without it
 
@@ -80,6 +99,13 @@ A native macOS WidgetKit widget in `AIQuotaBarWidget/` shows usage on the deskto
 1. Write `fetch_myprovider(api_key: str) -> ProviderData` — return `ProviderData` with `spent`/`limit` or `balance`
 2. Add one entry to `PROVIDER_REGISTRY`: `"myprovider_key": ("MyProvider", fetch_myprovider)`
 3. That's it — the menu item, key dialog, and display are all automatic.
+
+Users can switch any registry provider off via **Show Providers** in the menu. This
+stores the cfg_key in `disabled_providers` (see `provider_disabled` in `config.py`);
+a disabled provider is skipped by cookie auto-detect *and* by the fetch task list, so
+it vanishes from the menu, bar, share card and widget at once. Note this is stronger
+than "not configured" — without it, auto-detect would silently re-add the provider on
+the next refresh.
 
 ## Key decisions to preserve
 
@@ -93,6 +119,11 @@ A native macOS WidgetKit widget in `AIQuotaBarWidget/` shows usage on the deskto
   All notifications go through `_notify()` which swallows the exception silently.
 - **Cookies are cached** in `~/.claude_bar_config.json`. Auto-detect runs on first launch
   and on repeated 401/403 failures to silently refresh the session.
+- **Cookie providers self-heal.** ChatGPT/Cursor/Copilot swallow HTTP errors into
+  `ProviderData.error`, so `_fetch_providers` checks `is_auth_error()` and re-runs
+  browser detection + one retry (15-min per-provider cooldown, `_redetect_cookies`).
+  Without this a stale cached session made the provider silently vanish from the bar
+  forever, since first-launch detection only fires when no key is saved at all.
 
 ## API behaviour (confirmed)
 
@@ -108,6 +139,14 @@ Response fields:
 | `seven_day`        | Weekly all-models              | 0–100 percentage  |
 | `seven_day_sonnet` | Weekly Sonnet-only             | 0–100 percentage  |
 | `extra_usage`      | Overage toggle (null = off)    | —                 |
+| `limits[]`         | Generic per-limit array        | `percent` 0–100   |
+
+Per-model weekly caps (Opus/Sonnet/Fable) are no longer in `seven_day_*` — those
+come back null. They arrive as `limits[]` entries with `kind="weekly_scoped"` and
+`scope.model.display_name`; `_scoped_rows` turns them into `UsageData.scoped`
+(deduped by label against the legacy fields). `five_hour.resets_at` is null while
+no 5-hour window is open — the session row then reads "no active session" instead
+of a blank reset slot.
 
 ## Files
 
@@ -116,6 +155,7 @@ Response fields:
 | `claude_bar.py` | Entry point (imports `aiquotabar`)                   |
 | `aiquotabar/`   | Application package (see Architecture)               |
 | `install.sh`    | One-line curl installer (detects Python, LaunchAgent)|
+| `make_launcher.sh` | Creates /Applications/AIQuota.app — headless launcher that restarts the menu bar app + reloads the widget (Spotlight: "AIQuota") |
 | `requirements.txt` | `rumps`, `curl_cffi`, `browser-cookie3`           |
 | `setup.sh`      | Legacy manual installer (kept for reference)         |
 | `assets/`       | demo.gif and screenshots for README                  |
@@ -176,7 +216,7 @@ pkill -f claude_bar.py; sleep 1; python3 claude_bar.py &
 - Do not leave xcodebuild output registered with LaunchServices — the build step
   auto-runs `lsregister -trusted` on the build-dir app, creating a duplicate widget
   registration that fights the /Applications copy (pluginUUID flapping in chronod).
-  After installing, `lsregister -u` the build-dir bundle and delete it.
+  `build_widget.sh` now does the `lsregister -u` + delete at the end — don't drop it.
 
 - Do not add a `session_key` field — the app uses full cookie strings, not just the session key.
 - Do not multiply utilization values by 100 — all fields now return 0–100 percentages directly.

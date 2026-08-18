@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 
 from aiquotabar.config import (
     log, load_config, save_config, notif_enabled, set_notif,
+    provider_disabled, set_provider_disabled,
     REFRESH_INTERVALS, DEFAULT_REFRESH,
     WARN_THRESHOLD, CRIT_THRESHOLD, PACING_ALERT_MINUTES,
     UPDATE_CHECK_INTERVAL, HISTORY_COLORS,
@@ -22,7 +23,7 @@ from aiquotabar.config import (
 from aiquotabar.providers import (
     LimitRow, UsageData, ProviderData, parse_usage, fetch_raw,
     fetch_claude_code_stats, PROVIDER_REGISTRY, COOKIE_PROVIDERS,
-    CurlHTTPError, parse_cookie_string,
+    CurlHTTPError, parse_cookie_string, is_auth_error,
     _auto_detect_cookies, _auto_detect_chatgpt_cookies,
     _auto_detect_copilot_cookies, _auto_detect_cursor_cookies,
     _warn_keychain_once, _fmt_reset, _BROWSER_COOKIE3_OK,
@@ -1542,7 +1543,7 @@ class _UsagePanel:
         has_any_data = False
 
         # Claude section
-        if data and any([data.session, data.weekly_all, data.weekly_sonnet]):
+        if data and any([data.session, data.weekly_all, data.weekly_sonnet, *data.scoped]):
             has_any_data = True
             # Provider header: dot + name + reset time
             elements.append(('provider_header', y, 18, 'Claude', '#D97757',
@@ -1550,7 +1551,7 @@ class _UsagePanel:
             y += 18 + 6
 
             # Rows
-            for row in [data.session, data.weekly_all, data.weekly_sonnet]:
+            for row in [data.session, data.weekly_all, data.weekly_sonnet, *data.scoped]:
                 if row:
                     elements.append(('limit_row', y, 20, row, '#D97757'))
                     y += 20 + self.ROW_GAP
@@ -1824,14 +1825,15 @@ class _UsagePanel:
                           NSView, NSTextField, NSFont, NSColor, NSMakeRect,
                           NSTextAlignmentLeft, NSTextAlignmentRight, Quartz):
         """Render: label + progress bar + pct% text."""
-        label_w = 80
         pct_w = 40
-        bar_x = x + label_w + 4
-        bar_w = w - label_w - pct_w - 8
-        bar_y = y + (h - self.PROGRESS_H) / 2
 
-        # Label
-        lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(x, y, label_w, h))
+        # Label. The column used to be a hard 80pt, which fits "5H"/"7D" but
+        # clipped Cursor's dollar labels mid-string ("$2,505/$3,50" -- the text
+        # is 78pt wide, yet an NSTextField's cell insets eat a few points on
+        # each side, so it never fit). sizeToFit asks AppKit for the exact width
+        # including those insets; the column is then capped at half the row so a
+        # long label can't squeeze the progress bar out of existence.
+        lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(x, y, 80, h))
         lbl.setStringValue_(row.label)
         lbl.setBezeled_(False)
         lbl.setDrawsBackground_(False)
@@ -1840,7 +1842,14 @@ class _UsagePanel:
         lbl.setAlignment_(NSTextAlignmentLeft)
         lbl.setFont_(NSFont.systemFontOfSize_(11))
         lbl.setTextColor_(NSColor.secondaryLabelColor())
+        lbl.sizeToFit()
+        label_w = int(min(max(80, lbl.frame().size.width + 2), w * 0.5))
+        lbl.setFrame_(NSMakeRect(x, y, label_w, h))
         parent.addSubview_(lbl)
+
+        bar_x = x + label_w + 4
+        bar_w = w - label_w - pct_w - 8
+        bar_y = y + (h - self.PROGRESS_H) / 2
 
         # Track (background)
         track = NSView.alloc().initWithFrame_(NSMakeRect(bar_x, bar_y, bar_w, self.PROGRESS_H))
@@ -1933,6 +1942,7 @@ class ClaudeBar(rumps.App):
         self._warned_pcts: set[str] = set()   # track which rows we've notified
         self._prev_pcts: dict[str, int] = {}  # previous pct per row key (reset detection)
         self._auth_fail_count = 0
+        self._cookie_redetect_at: dict[str, float] = {}  # cfg_key -> last re-detect ts
         self._fetching = False
         self._last_updated: datetime | None = None
 
@@ -2000,7 +2010,8 @@ class ClaudeBar(rumps.App):
         # -- CLAUDE section ---------------------------------------------------
         items.append(_section_header_mi("  Claude", "claude_icon.png", "#D97757"))
 
-        if data is None or not any([data.session, data.weekly_all, data.weekly_sonnet]):
+        if data is None or not any([data.session, data.weekly_all, data.weekly_sonnet,
+                                    *(data.scoped if data else [])]):
             items.append(_mi("  No data \u2014 click Auto-detect from Browser"))
         else:
             if data.session:
@@ -2023,7 +2034,7 @@ class ClaudeBar(rumps.App):
                     items.append(_mi(f"  Hit limit {hits}x this week"))
                 items.append(None)
 
-            for row in [data.weekly_all, data.weekly_sonnet]:
+            for row in [data.weekly_all, data.weekly_sonnet, *data.scoped]:
                 if row:
                     lines = _row_lines(row)
                     items.append(_mi(lines[0]))
@@ -2224,6 +2235,19 @@ class ClaudeBar(rumps.App):
         )
         bar_menu.add(auto_item)
         items.append(bar_menu)
+
+        # Provider visibility submenu -- unchecked providers are never fetched,
+        # auto-detected, or shown anywhere (menu, bar, share card, widget).
+        show_menu = rumps.MenuItem("Show Providers")
+        for cfg_key, (name, _) in PROVIDER_REGISTRY.items():
+            item = rumps.MenuItem(
+                name, callback=self._make_provider_show_cb(cfg_key, name)
+            )
+            item._menuitem.setState_(
+                0 if provider_disabled(self.config, cfg_key) else 1
+            )
+            show_menu.add(item)
+        items.append(show_menu)
 
         # Refresh interval submenu
         interval_menu = rumps.MenuItem("Refresh Interval")
@@ -2615,7 +2639,7 @@ class ClaudeBar(rumps.App):
             (data.session,       "session"),
             (data.weekly_all,    "weekly_all"),
             (data.weekly_sonnet, "weekly_sonnet"),
-        ]
+        ] + [(r, f"scoped_{r.label}") for r in data.scoped]
         warn_enabled = notif_enabled(self.config, "claude_warning")
         reset_enabled = notif_enabled(self.config, "claude_reset")
 
@@ -2849,7 +2873,7 @@ class ClaudeBar(rumps.App):
         if primary:
             weekly_maxed = any(
                 r and r.pct >= CRIT_THRESHOLD
-                for r in [data.weekly_all, data.weekly_sonnet]
+                for r in [data.weekly_all, data.weekly_sonnet, *data.scoped]
             )
             extra = " \u00b7" if (weekly_maxed and primary is data.session
                              and primary.pct < CRIT_THRESHOLD) else ""
@@ -2891,19 +2915,55 @@ class ClaudeBar(rumps.App):
         except Exception:
             log.debug("panel refresh in _apply failed", exc_info=True)
 
+    # Cookie detectors per config key -- used both for first-time detection and
+    # for silently re-detecting after a session expires.
+    _COOKIE_DETECTORS = {
+        "chatgpt_cookies": _auto_detect_chatgpt_cookies,
+        "copilot_cookies": _auto_detect_copilot_cookies,
+        "cursor_cookies":  _auto_detect_cursor_cookies,
+    }
+    # Don't hammer the browser/Keychain when the user is logged out everywhere.
+    COOKIE_REDETECT_COOLDOWN = 15 * 60
+
+    def _redetect_cookies(self, cfg_key: str) -> str | None:
+        """Re-read cookies for one provider from the browser and persist them.
+
+        Rate-limited per provider: cookie detection can spawn a Keychain prompt
+        and takes seconds, so a permanently logged-out provider must not retry
+        it on every refresh cycle.
+        """
+        detect_fn = self._COOKIE_DETECTORS.get(cfg_key)
+        if detect_fn is None:
+            return None
+        last = self._cookie_redetect_at.get(cfg_key, 0)
+        if time.time() - last < self.COOKIE_REDETECT_COOLDOWN:
+            return None
+        self._cookie_redetect_at[cfg_key] = time.time()
+        try:
+            ck = detect_fn()
+        except Exception:
+            log.debug("cookie re-detect failed for %s", cfg_key, exc_info=True)
+            return None
+        if not ck:
+            return None
+        with self._config_lock:
+            if self.config.get(cfg_key) == ck:
+                return None          # same stale cookies -- nothing gained
+            self.config[cfg_key] = ck
+            save_config(self.config)
+        log.info("re-detected %s cookies from browser", cfg_key)
+        return ck
+
     def _fetch_providers(self):
         """Fetch all configured third-party API providers (sync, called from fetch thread)."""
-        # Auto-detect ChatGPT cookies if not saved yet
-        _cookie_detectors = {
-            "chatgpt_cookies": _auto_detect_chatgpt_cookies,
-            "copilot_cookies": _auto_detect_copilot_cookies,
-            "cursor_cookies":  _auto_detect_cursor_cookies,
-        }
+        # Auto-detect cookies for providers we have nothing saved for yet
         for cfg_key in COOKIE_PROVIDERS:
             with self._config_lock:
                 has_key = bool(self.config.get(cfg_key))
+                if provider_disabled(self.config, cfg_key):
+                    continue
             if not has_key:
-                detect_fn = _cookie_detectors.get(cfg_key)
+                detect_fn = self._COOKIE_DETECTORS.get(cfg_key)
                 if detect_fn:
                     ck = detect_fn()
                     if ck:
@@ -2912,25 +2972,52 @@ class ClaudeBar(rumps.App):
                             save_config(self.config)
 
         with self._config_lock:
-            keys_snapshot = {k: self.config.get(k) for k in PROVIDER_REGISTRY}
+            keys_snapshot = {
+                k: (None if provider_disabled(self.config, k) else self.config.get(k))
+                for k in PROVIDER_REGISTRY
+            }
         tasks = []
         for cfg_key, (name, fetch_fn) in PROVIDER_REGISTRY.items():
             key = keys_snapshot.get(cfg_key)
             if key:
-                tasks.append((fetch_fn, key))
-        if tasks:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            results = []
-            with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
-                futures = {pool.submit(fn, k): (fn, k) for fn, k in tasks}
-                for future in as_completed(futures):
-                    try:
-                        results.append(future.result())
-                    except Exception:
-                        log.exception("provider fetch failed")
-            self._provider_data = results
-        else:
+                tasks.append((cfg_key, fetch_fn, key))
+        if not tasks:
             self._provider_data = []
+            return
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        results: dict[str, ProviderData] = {}
+        with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+            futures = {pool.submit(fn, k): cfg_key for cfg_key, fn, k in tasks}
+            for future in as_completed(futures):
+                cfg_key = futures[future]
+                try:
+                    results[cfg_key] = future.result()
+                except Exception:
+                    log.exception("provider fetch failed")
+
+        # Session expired? Cached cookies go stale long before the user notices
+        # -- the provider just vanishes from the bar. Re-read them from the
+        # browser and retry once, so a still-logged-in browser heals it silently.
+        retry = [
+            cfg_key for cfg_key in results
+            if cfg_key in COOKIE_PROVIDERS and is_auth_error(results[cfg_key].error)
+        ]
+        for cfg_key in retry:
+            fresh = self._redetect_cookies(cfg_key)
+            if not fresh:
+                continue
+            _, fetch_fn = PROVIDER_REGISTRY[cfg_key]
+            try:
+                pd = fetch_fn(fresh)
+            except Exception:
+                log.exception("provider re-fetch failed for %s", cfg_key)
+                continue
+            if not pd.error:
+                log.info("%s recovered after cookie re-detect", cfg_key)
+            results[cfg_key] = pd
+
+        self._provider_data = list(results.values())
 
     # -- callbacks ------------------------------------------------------------
 
@@ -3012,6 +3099,22 @@ class ClaudeBar(rumps.App):
             current = notif_enabled(self.config, nkey)
             set_notif(self.config, nkey, not current)
             sender._menuitem.setState_(0 if current else 1)
+        return _cb
+
+    def _make_provider_show_cb(self, cfg_key: str, name: str):
+        def _cb(sender):
+            disable = not provider_disabled(self.config, cfg_key)
+            with self._config_lock:
+                set_provider_disabled(self.config, cfg_key, disable)
+            sender._menuitem.setState_(0 if disable else 1)
+            if disable:
+                # Drop the fetched row now so the section goes away immediately
+                # instead of lingering until the next refresh cycle.
+                self._provider_data = [
+                    pd for pd in self._provider_data if pd.name != name
+                ]
+                self._rebuild_menu(self._last_data)
+            self._schedule_fetch()
         return _cb
 
     def _make_interval_cb(self, secs: int, label: str):

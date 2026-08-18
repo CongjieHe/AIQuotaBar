@@ -137,6 +137,11 @@ if [ "$WIDGET_INSTALLED" = true ]; then
 fi
 echo ""
 
+# ── 5c. AIQuota launcher app ─────────────────────────────────────────────────
+if bash "$INSTALL_DIR/make_launcher.sh" "$INSTALL_DIR" >/dev/null 2>&1; then
+    echo "  ✓  Launcher: /Applications/AIQuota.app — Spotlight \"AIQuota\" relaunches everything"
+fi
+
 # ── 6. Launch now ─────────────────────────────────────────────────────────────
 pkill -f "$INSTALL_DIR/claude_bar.py" 2>/dev/null || true
 sleep 1

@@ -35,6 +35,8 @@ class UsageData:
     session: LimitRow | None = None
     weekly_all: LimitRow | None = None
     weekly_sonnet: LimitRow | None = None
+    # Model-scoped weekly limits (Opus/Sonnet/Fable...) from the `limits[]` array
+    scoped: list[LimitRow] = field(default_factory=list)
     overages_enabled: bool | None = None
     raw: dict = field(default_factory=dict)
 
@@ -203,6 +205,33 @@ def _row(data: dict, key: str, label: str) -> LimitRow | None:
     return LimitRow(label, pct, reset)
 
 
+def _scoped_rows(u: dict, existing: list) -> list[LimitRow]:
+    """Model-scoped weekly limits taken from the generic `limits[]` array.
+
+    Anthropic moved per-model weekly caps out of the dedicated `seven_day_*`
+    fields (those now come back null) into `limits[]` entries with
+    kind="weekly_scoped" and scope.model.display_name. Without reading them the
+    menu silently drops a limit that may already sit at 100%.
+    """
+    seen = {r.label for r in existing if r}
+    rows: list[LimitRow] = []
+    for lim in (u.get("limits") or []):
+        if not isinstance(lim, dict) or lim.get("kind") != "weekly_scoped":
+            continue
+        scope = lim.get("scope") or {}
+        model = (scope.get("model") or {}).get("display_name")
+        label = f"7D {model}" if model else "7D scoped"
+        if label in seen:
+            continue
+        seen.add(label)
+        try:
+            pct = min(100, round(float(lim.get("percent") or 0)))
+        except (TypeError, ValueError):
+            pct = 0
+        rows.append(LimitRow(label, pct, _fmt_reset(lim.get("resets_at"))))
+    return rows
+
+
 def parse_usage(raw: dict) -> UsageData:
     """
     API response shape (confirmed):
@@ -217,10 +246,19 @@ def parse_usage(raw: dict) -> UsageData:
 
     # Short window labels ("5H"/"7D") — long names get truncated in the
     # menu and widget, and the API field names already encode the window.
+    session = _row(u, "five_hour", "5H")
+    if session is not None and not session.reset_str:
+        # A 5-hour window only starts with your first message: while idle the
+        # API returns resets_at=null, which used to render as a blank reset
+        # slot and read like the app had broken.
+        session.reset_str = "no active session"
+    weekly_all = _row(u, "seven_day", "7D")
+    weekly_sonnet = _row(u, "seven_day_sonnet", "7D Sonnet")
     return UsageData(
-        session=_row(u, "five_hour", "5H"),
-        weekly_all=_row(u, "seven_day", "7D"),
-        weekly_sonnet=_row(u, "seven_day_sonnet", "7D Sonnet"),
+        session=session,
+        weekly_all=weekly_all,
+        weekly_sonnet=weekly_sonnet,
+        scoped=_scoped_rows(u, [weekly_all, weekly_sonnet]),
         overages_enabled=overages,
         raw=raw,
     )
@@ -273,6 +311,12 @@ def _parse_wham_window(window: dict | None, label_prefix: str = "") -> LimitRow 
     return LimitRow(label, pct, reset_str)
 
 
+# Model-specific side quotas we deliberately don't surface. Spark is a
+# speed-optimised research preview on its own 7D bucket -- it is never the
+# user's real ceiling, and for anyone not using that model it reads 0 forever.
+_WHAM_HIDDEN_LIMITS = ("spark",)
+
+
 def _parse_wham_usage(data: dict) -> ProviderData:
     """Parse /backend-api/wham/usage response.
 
@@ -302,6 +346,8 @@ def _parse_wham_usage(data: dict) -> ProviderData:
         if not isinstance(extra, dict):
             continue
         name = extra.get("limit_name") or extra.get("name") or "Extra"
+        if any(h in name.lower() for h in _WHAM_HIDDEN_LIMITS):
+            continue
         # "GPT-5.3-Codex-Spark" -> "Spark": keep only the last dash-token
         short = name.rsplit("-", 1)[-1].replace("_", " ").strip().title() or "Extra"
         _add_bucket(extra.get("rate_limit") or extra, short)
@@ -491,6 +537,19 @@ PROVIDER_REGISTRY: dict[str, tuple[str, callable]] = {
 
 # Cookie-based providers (auto-detected from browser, not manually entered)
 COOKIE_PROVIDERS = {"chatgpt_cookies", "copilot_cookies", "cursor_cookies"}
+
+
+def is_auth_error(err: str | None) -> bool:
+    """True when a ProviderData error looks like an expired/invalid session.
+
+    Cookie providers swallow HTTP errors into ProviderData.error, so the caller
+    can only tell "session died" from "API hiccup" by the message text.
+    """
+    if not err:
+        return False
+    low = err.lower()
+    return ("401" in low or "403" in low or "not logged in" in low
+            or "unauthor" in low or "forbidden" in low)
 
 
 # ── Claude Code local stats ───────────────────────────────────────────────────

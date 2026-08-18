@@ -104,3 +104,21 @@ def set_notif(cfg: dict, key: str, value: bool):
     """Persist a single notification toggle."""
     cfg.setdefault("notifications", {})[key] = value
     save_config(cfg)
+
+
+def provider_disabled(cfg: dict, cfg_key: str) -> bool:
+    """True if the user has switched this provider off entirely.
+
+    Disabled providers are never auto-detected, fetched, or displayed. This is
+    distinct from "not configured" -- a disabled provider stays off even though
+    its cookies are sitting in the browser waiting to be picked up.
+    """
+    return cfg_key in (cfg.get("disabled_providers") or [])
+
+
+def set_provider_disabled(cfg: dict, cfg_key: str, disabled: bool):
+    """Persist a single provider on/off toggle."""
+    current = set(cfg.get("disabled_providers") or [])
+    current.add(cfg_key) if disabled else current.discard(cfg_key)
+    cfg["disabled_providers"] = sorted(current)
+    save_config(cfg)
