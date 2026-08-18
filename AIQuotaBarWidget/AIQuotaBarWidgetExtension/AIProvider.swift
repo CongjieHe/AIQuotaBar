@@ -111,8 +111,14 @@ extension AIProvider {
             let session = snap.claude.session
             var rows: [LimitRow] = []
             if let s = session { rows.append(s) }
-            if let w = snap.claude.weeklyAll { rows.append(w) }
-            if let ws = snap.claude.weeklySonnet { rows.append(ws) }
+            // Weekly rows sorted worst-first: the medium widget only has room
+            // for two segments, so a maxed model-scoped cap must beat a quiet
+            // all-models one for the second slot.
+            var weekly: [LimitRow] = []
+            if let w = snap.claude.weeklyAll { weekly.append(w) }
+            if let ws = snap.claude.weeklySonnet { weekly.append(ws) }
+            weekly.append(contentsOf: snap.claude.scoped ?? [])
+            rows.append(contentsOf: weekly.sorted { $0.pct > $1.pct })
             let extra: String? = snap.claudeCode.todayMessages > 0
                 ? "\(snap.claudeCode.todayMessages) msgs today"
                 : nil

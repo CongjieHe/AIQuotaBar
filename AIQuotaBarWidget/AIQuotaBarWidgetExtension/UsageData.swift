@@ -43,10 +43,13 @@ struct ClaudeUsage: Codable {
     let session: LimitRow?
     let weeklyAll: LimitRow?
     let weeklySonnet: LimitRow?
+    /// Model-scoped weekly caps (Opus/Sonnet/Fable...). Optional: older caches
+    /// written before the app learned about `limits[]` simply omit the key.
+    let scoped: [LimitRow]?
     let overagesEnabled: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case session
+        case session, scoped
         case weeklyAll = "weekly_all"
         case weeklySonnet = "weekly_sonnet"
         case overagesEnabled = "overages_enabled"
@@ -107,16 +110,17 @@ enum UsageDataReader {
         return try? JSONDecoder().decode(UsageSnapshot.self, from: data)
     }
 
-    /// Returns true if the data is older than the given interval (seconds).
-    static func isStale(_ snapshot: UsageSnapshot, threshold: TimeInterval = 1800) -> Bool {
+    /// When the menu bar app last wrote the cache, or nil if unparseable.
+    static func writtenAt(_ snapshot: UsageSnapshot) -> Date? {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        guard let date = formatter.date(from: snapshot.updatedAt) else {
-            // Try without fractional seconds
-            let basic = ISO8601DateFormatter()
-            guard let d = basic.date(from: snapshot.updatedAt) else { return true }
-            return Date().timeIntervalSince(d) > threshold
-        }
+        return formatter.date(from: snapshot.updatedAt)
+            ?? ISO8601DateFormatter().date(from: snapshot.updatedAt)
+    }
+
+    /// Returns true if the data is older than the given interval (seconds).
+    static func isStale(_ snapshot: UsageSnapshot, threshold: TimeInterval = 1800) -> Bool {
+        guard let date = writtenAt(snapshot) else { return true }
         return Date().timeIntervalSince(date) > threshold
     }
 }

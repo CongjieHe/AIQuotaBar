@@ -7,6 +7,10 @@ struct MediumWidgetView: View {
     var body: some View {
         if let snap = entry.snapshot {
             contentView(snap)
+                .opacity(entry.isStale ? 0.55 : 1)
+                .overlay(alignment: .topTrailing) {
+                    if entry.isStale { StaleBadge(writtenAt: entry.writtenAt) }
+                }
                 .containerBackground(.fill.tertiary, for: .widget)
         } else {
             noDataView
@@ -68,10 +72,13 @@ struct MediumWidgetView: View {
     private func limitSegment(_ row: LimitRow, accent: Color, showReset: Bool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline) {
+                // Cursor's dollar labels ("$2,505/$3,500") are much wider than
+                // "5H"/"7D" and would otherwise truncate in the shared segment.
                 Text(row.label)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.7)
                 Spacer(minLength: 3)
                 Text("\(row.pct)%")
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
@@ -128,5 +135,30 @@ struct MediumWidgetView: View {
         if pct >= 95 { return .red }
         if pct >= 80 { return .orange }
         return accent
+    }
+}
+
+// MARK: - Stale badge
+
+/// Shown when the cache stopped being updated (app quit, or the reload nudge
+/// broke). Without it the widget renders week-old numbers that look current.
+struct StaleBadge: View {
+    let writtenAt: Date?
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "exclamationmark.arrow.trianglehead.2.clockwise.rotate.90")
+                .font(.system(size: 8, weight: .semibold))
+            if let date = writtenAt {
+                Text(date, style: .relative) + Text(" old")
+            } else {
+                Text("stale")
+            }
+        }
+        .font(.system(size: 8))
+        .foregroundStyle(.orange)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(.orange.opacity(0.15)))
     }
 }

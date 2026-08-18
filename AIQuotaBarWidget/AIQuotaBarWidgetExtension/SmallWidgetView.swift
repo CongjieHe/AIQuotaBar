@@ -7,6 +7,10 @@ struct SmallWidgetView: View {
     var body: some View {
         if let snap = entry.snapshot {
             dataView(snap)
+                .opacity(entry.isStale ? 0.55 : 1)
+                .overlay(alignment: .top) {
+                    if entry.isStale { StaleBadge(writtenAt: entry.writtenAt) }
+                }
                 .containerBackground(.fill.tertiary, for: .widget)
         } else {
             noDataView

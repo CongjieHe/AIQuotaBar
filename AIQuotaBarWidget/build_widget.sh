@@ -69,10 +69,36 @@ echo "  ↓  Installing to $INSTALL_PATH…"
 rm -rf "$INSTALL_PATH"
 cp -R "$BUILT_APP" "$INSTALL_PATH"
 
+# xcodebuild runs with CODE_SIGNING_ALLOWED=NO (no dev team required), which
+# leaves the bundle unsigned AND drops the entitlements. pkd then refuses the
+# extension with "plug-ins must be sandboxed" and the widget vanishes from the
+# widget picker with no other symptom. Ad-hoc sign it ourselves, carrying the
+# entitlements — inside-out: extension first, then the app that contains it.
+#   - app-sandbox: mandatory for any app extension
+#   - temporary-exception.files.home-relative-path.read-only: lets the sandboxed
+#     extension read ~/Library/Application Support/AIQuotaBar/usage.json, which
+#     is outside its own container
+echo "  ↓  Ad-hoc signing…"
+codesign --force --sign - --timestamp=none \
+    --entitlements "$PROJECT_DIR/AIQuotaBarWidgetExtension/AIQuotaBarWidgetExtension.entitlements" \
+    "$INSTALL_PATH/Contents/PlugIns/AIQuotaBarWidgetExtension.appex" >/dev/null 2>&1
+codesign --force --sign - --timestamp=none \
+    --entitlements "$PROJECT_DIR/AIQuotaBarHost/AIQuotaBarHost.entitlements" \
+    "$INSTALL_PATH" >/dev/null 2>&1
+codesign --verify --deep --strict "$INSTALL_PATH" 2>/dev/null \
+    || echo "  ⚠  signature check failed — the widget may not register"
+
 # Launch once to register the widget with the system
-open "$INSTALL_PATH"
+open -g "$INSTALL_PATH"
 sleep 2
 osascript -e 'quit app "AIQuotaBarHost"' 2>/dev/null || true
+
+# xcodebuild also registers the build-dir copy with LaunchServices; leaving it
+# there gives the widget two registrations that fight each other (pluginUUID
+# flapping in chronod). Unregister and delete it.
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+"$LSREGISTER" -u "$BUILT_APP" 2>/dev/null || true
+rm -rf "$BUILT_APP"
 
 echo "  ✓  Widget installed!"
 echo ""

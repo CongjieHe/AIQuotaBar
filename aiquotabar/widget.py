@@ -5,7 +5,10 @@ import os
 import subprocess
 from datetime import datetime, timezone
 
-from aiquotabar.config import log, WIDGET_HOST_APP, WIDGET_CACHE_DIR, WIDGET_CACHE_FILE
+from aiquotabar.config import (
+    log, provider_disabled,
+    WIDGET_HOST_APP, WIDGET_CACHE_DIR, WIDGET_CACHE_FILE,
+)
 from aiquotabar.providers import LimitRow, UsageData, ProviderData
 
 
@@ -38,7 +41,7 @@ def _write_widget_cache(
                 "cursor_cookies":  "cursor",
             }
             for cfg_key, prov_id in _key_map.items():
-                if cfg.get(cfg_key):
+                if cfg.get(cfg_key) and not provider_disabled(cfg, cfg_key):
                     active.append(prov_id)
             # Fallback: always show at least Claude
             return active or ["claude"]
@@ -93,6 +96,7 @@ def _write_widget_cache(
                 "session": _row_dict(data.session),
                 "weekly_all": _row_dict(data.weekly_all),
                 "weekly_sonnet": _row_dict(data.weekly_sonnet),
+                "scoped": [_row_dict(r) for r in data.scoped],
                 "overages_enabled": data.overages_enabled,
             },
             "chatgpt": {
@@ -119,9 +123,12 @@ def _write_widget_cache(
         os.replace(tmp, WIDGET_CACHE_FILE)
         log.debug("widget cache written: %s", WIDGET_CACHE_FILE)
 
-        # Nudge WidgetKit to reload (non-blocking, best-effort)
+        # Nudge WidgetKit to reload (non-blocking, best-effort). -n forces a new
+        # instance: plain `open` would just activate an already-running host and
+        # the --reload-widget arg would never reach it. The new instance exits
+        # in init() before any window is built, so instances never accumulate.
         subprocess.Popen(
-            ["open", "-g", "-a", "AIQuotaBarHost", "--args", "--reload-widget"],
+            ["open", "-n", "-g", "-a", "AIQuotaBarHost", "--args", "--reload-widget"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except Exception:

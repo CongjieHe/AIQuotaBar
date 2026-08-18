@@ -5,6 +5,8 @@ struct QuotaEntry: TimelineEntry {
     let snapshot: UsageSnapshot?
     let isStale: Bool
     let providers: [AIProvider]
+    /// When the cache was written -- drives the "stale" badge's age text.
+    var writtenAt: Date? = nil
 
     static let placeholder = QuotaEntry(
         date: .now,
@@ -15,6 +17,7 @@ struct QuotaEntry: TimelineEntry {
                 session: LimitRow(label: "5H", pct: 36, resetStr: "resets in 2h 14m"),
                 weeklyAll: LimitRow(label: "7D", pct: 83, resetStr: "resets Wed 23:00"),
                 weeklySonnet: nil,
+                scoped: nil,
                 overagesEnabled: false
             ),
             chatgpt: ChatGPTUsage(
