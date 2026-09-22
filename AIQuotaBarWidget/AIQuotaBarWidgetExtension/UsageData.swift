@@ -25,17 +25,18 @@ struct UsageSnapshot: Codable {
         // 1. User's explicit bar choice (set via Status Bar menu in the app)
         if let bar = barProviders, !bar.isEmpty {
             let parsed = bar.compactMap { AIProvider(rawValue: $0) }
+                .filter { $0 != .claude && $0 != .none }
             if !parsed.isEmpty { return parsed }
         }
         // 2. Auto: top 2 active by priority
-        let priority: [AIProvider] = [.claude, .chatgpt, .cursor, .copilot]
+        let priority: [AIProvider] = [.chatgpt, .cursor, .copilot]
         guard let ids = activeProviders, !ids.isEmpty else {
-            return [.claude, .chatgpt]
+            return [.chatgpt, .cursor]
         }
         let active = Set(ids.compactMap { AIProvider(rawValue: $0) })
         let picked = priority.filter { active.contains($0) }
         let result = Array(picked.prefix(2))
-        return result.isEmpty ? [.claude, .chatgpt] : result
+        return result.isEmpty ? [.chatgpt, .cursor] : result
     }
 }
 

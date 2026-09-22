@@ -7,6 +7,10 @@ import WidgetKit
 enum AIProvider: String, AppEnum, CaseIterable, Codable {
     case claude, chatgpt, cursor, copilot, none
 
+    // Keep the case so previously saved widget intents still decode, but do
+    // not offer Claude as a selectable/displayable provider anymore.
+    static var allCases: [AIProvider] { [.chatgpt, .cursor, .copilot, .none] }
+
     static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "AI Provider")
     static var caseDisplayRepresentations: [AIProvider: DisplayRepresentation] = [
         .claude:  "Claude",
@@ -65,10 +69,10 @@ struct SelectProvidersIntent: WidgetConfigurationIntent {
     static var title: LocalizedStringResource = "Select Providers"
     static var description = IntentDescription("Choose which AI providers to display in the widget.")
 
-    @Parameter(title: "Provider 1", default: .claude)
+    @Parameter(title: "Provider 1", default: .chatgpt)
     var provider1: AIProvider
 
-    @Parameter(title: "Provider 2", default: .chatgpt)
+    @Parameter(title: "Provider 2", default: .cursor)
     var provider2: AIProvider
 
     // NOTE: must be written as `AIProvider.none`, not `.none` — the `default:`
@@ -84,13 +88,16 @@ struct SelectProvidersIntent: WidgetConfigurationIntent {
 
     /// Active (non-none) providers in order.
     var activeProviders: [AIProvider] {
-        [provider1, provider2, provider3, provider4].filter(\.isReal)
+        [provider1, provider2, provider3, provider4]
+            .filter { $0.isReal && $0 != .claude }
     }
 
     /// True when user hasn't touched the widget config (all slots at compile-time defaults).
     var isUsingDefaults: Bool {
-        provider1 == .claude && provider2 == .chatgpt
-            && provider3 == .none && provider4 == .none
+        let trailingSlotsEmpty = provider3 == .none && provider4 == .none
+        let currentDefaults = provider1 == .chatgpt && provider2 == .cursor
+        let legacyDefaults = provider1 == .claude && provider2 == .chatgpt
+        return trailingSlotsEmpty && (currentDefaults || legacyDefaults)
     }
 }
 

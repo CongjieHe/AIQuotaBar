@@ -33,8 +33,6 @@ def _write_widget_cache(
         def _active_providers(cfg: dict) -> list[str]:
             """Return list of provider IDs the user has configured."""
             active = []
-            if cfg.get("cookie_str"):
-                active.append("claude")
             _key_map = {
                 "chatgpt_cookies": "chatgpt",
                 "copilot_cookies": "copilot",
@@ -43,15 +41,15 @@ def _write_widget_cache(
             for cfg_key, prov_id in _key_map.items():
                 if cfg.get(cfg_key) and not provider_disabled(cfg, cfg_key):
                     active.append(prov_id)
-            # Fallback: always show at least Claude
-            return active or ["claude"]
+            return active
 
         def _bar_providers(cfg: dict) -> list[str] | None:
             """User's explicit bar provider choices (lowercase IDs), or None for auto."""
             chosen = cfg.get("bar_providers")
             if not chosen:
                 return None
-            return [n.lower() for n in chosen]
+            # Filter selections written before Claude was removed from display.
+            return [n.lower() for n in chosen if n != "Claude"] or None
 
         def _copilot_block(provs: list[ProviderData]) -> dict:
             pd = next((p for p in provs if p.name == "Copilot"), None)

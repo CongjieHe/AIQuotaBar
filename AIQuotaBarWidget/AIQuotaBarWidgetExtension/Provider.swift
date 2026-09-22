@@ -29,7 +29,7 @@ struct QuotaProvider: AppIntentTimelineProvider {
         guard let snapshot = UsageDataReader.read() else {
             let providers = configuration.activeProviders
             return QuotaEntry(date: .now, snapshot: nil, isStale: false,
-                              providers: providers.isEmpty ? [.claude, .chatgpt] : providers)
+                              providers: providers.isEmpty ? [.chatgpt, .cursor] : providers)
         }
 
         // If user hasn't customized widget, auto-detect from what the Python app found
@@ -38,7 +38,7 @@ struct QuotaProvider: AppIntentTimelineProvider {
             providers = snapshot.detectedProviders
         } else {
             let explicit = configuration.activeProviders
-            providers = explicit.isEmpty ? [.claude, .chatgpt] : explicit
+            providers = explicit.isEmpty ? [.chatgpt, .cursor] : explicit
         }
 
         let stale = UsageDataReader.isStale(snapshot)
