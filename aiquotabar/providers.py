@@ -638,9 +638,21 @@ try:
         try:
             jar = fn(domain_name=domain)
             cookies = {x.name: x for x in jar}
-            if target not in cookies:
+            # NextAuth splits large session tokens into numbered cookies.
+            # Keep those cookies under their original names when sending them;
+            # the server reassembles the token.
+            session_cookies = [cookies[target]] if target in cookies else []
+            if not session_cookies:
+                chunks = sorted(
+                    (int(k[len(target) + 1:]), c)
+                    for k, c in cookies.items()
+                    if k.startswith(target + '.') and k[len(target) + 1:].isdigit()
+                )
+                if chunks and [i for i, _ in chunks] == list(range(len(chunks))):
+                    session_cookies = [c for _, c in chunks]
+            if not session_cookies:
                 continue
-            expires = cookies[target].expires or 0
+            expires = min(c.expires or 0 for c in session_cookies)
             # Normalize expiry to seconds. Firefox can report the value in
             # milliseconds (or an overflowed scale), which made a stale
             # session always out-rank a valid Chromium one. Anything past
@@ -677,8 +689,7 @@ def _run_cookie_detection(domain: str, target_cookie: str) -> list[str]:
             [sys.executable, "-c", _DETECT_SCRIPT, domain, target_cookie],
             capture_output=True, text=True, timeout=60,
         )
-        log.debug("cookie-detect rc=%d out=%r err=%r",
-                  r.returncode, r.stdout[:200], r.stderr[:200])
+        log.debug("cookie-detect rc=%d", r.returncode)
         if r.stdout.strip():
             data = json.loads(r.stdout.strip())
             if isinstance(data, list):
