@@ -5,19 +5,64 @@ import os
 import logging
 import logging.handlers
 
+# ── paths ────────────────────────────────────────────────────────────────────
+
+APP_SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/AIQuotaBar")
+CONFIG_FILE = os.path.join(APP_SUPPORT_DIR, "config.json")
+LOG_FILE = os.path.join(APP_SUPPORT_DIR, "aiquotabar.log")
+HISTORY_FILE = os.path.join(APP_SUPPORT_DIR, "history.json")
+LOG_BACKUPS = 3
+
+LAUNCH_AGENT_LABEL = "com.aiquotabar"
+LAUNCH_AGENT_PLIST = os.path.expanduser(
+    f"~/Library/LaunchAgents/{LAUNCH_AGENT_LABEL}.plist"
+)
+# Names used before the app was renamed from "Claude Usage Bar".
+LEGACY_LAUNCH_AGENT_LABEL = "com.claudebar"
+LEGACY_LAUNCH_AGENT_PLIST = os.path.expanduser(
+    f"~/Library/LaunchAgents/{LEGACY_LAUNCH_AGENT_LABEL}.plist"
+)
+
+
+def _migrate_legacy_files():
+    """Move pre-rename ~/.claude_bar* files into APP_SUPPORT_DIR (one-time).
+
+    Runs before logging is configured, so it must not log. A destination that
+    already has content wins; an empty one is the log file launchd creates
+    for StandardOutPath before Python starts, and is safe to replace.
+    """
+    os.makedirs(APP_SUPPORT_DIR, exist_ok=True)
+    pairs = [
+        ("~/.claude_bar_config.json", CONFIG_FILE),
+        ("~/.claude_bar_history.json", HISTORY_FILE),
+    ] + [
+        (f"~/.claude_bar.log{sfx}", f"{LOG_FILE}{sfx}")
+        for sfx in [""] + [f".{i}" for i in range(1, LOG_BACKUPS + 1)]
+    ]
+    for old, new in pairs:
+        old = os.path.expanduser(old)
+        try:
+            if not os.path.exists(old):
+                continue
+            if os.path.exists(new) and os.path.getsize(new) > 0:
+                continue
+            os.replace(old, new)
+        except OSError:
+            pass
+
+
+_migrate_legacy_files()
+
 # ── logging ──────────────────────────────────────────────────────────────────
 
-LOG_FILE = os.path.expanduser("~/.claude_bar.log")
 _log_handler = logging.handlers.RotatingFileHandler(
-    LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3,
+    LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=LOG_BACKUPS,
 )
 _log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
 logging.basicConfig(handlers=[_log_handler], level=logging.DEBUG)
 log = logging.getLogger("aiquotabar")
 
-# ── paths & thresholds ───────────────────────────────────────────────────────
-
-CONFIG_FILE = os.path.expanduser("~/.claude_bar_config.json")
+# ── thresholds ───────────────────────────────────────────────────────────────
 
 REFRESH_INTERVALS = {
     "1 min":  60,
@@ -30,9 +75,7 @@ WARN_THRESHOLD = 80   # notify when any limit crosses this %
 CRIT_THRESHOLD = 95   # title turns red emoji above this %
 
 WIDGET_HOST_APP = "/Applications/AIQuotaBarHost.app"
-WIDGET_CACHE_DIR = os.path.expanduser(
-    "~/Library/Application Support/AIQuotaBar"
-)
+WIDGET_CACHE_DIR = APP_SUPPORT_DIR
 WIDGET_CACHE_FILE = os.path.join(WIDGET_CACHE_DIR, "usage.json")
 
 # ── notification defaults ─────────────────────────────────────────────────────
@@ -51,12 +94,11 @@ NOTIF_DEFAULTS = {
 
 # ── usage history + burn rate ────────────────────────────────────────────────
 
-HISTORY_FILE = os.path.expanduser("~/.claude_bar_history.json")
 HISTORY_MAX_AGE = 24 * 3600  # prune entries older than 24 h
 PACING_ALERT_MINUTES = 30    # alert when ETA drops below this
 
 # ── SQLite long-term history ─────────────────────────────────────────────────
-HISTORY_DB = os.path.join(os.path.expanduser("~/Library/Application Support/AIQuotaBar"), "history.db")
+HISTORY_DB = os.path.join(APP_SUPPORT_DIR, "history.db")
 SAMPLES_MAX_DAYS = 7
 DAILY_MAX_DAYS = 90
 LIMIT_HIT_PCT = 95

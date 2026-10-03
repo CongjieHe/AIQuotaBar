@@ -39,20 +39,20 @@ cat > "$APP/Contents/MacOS/AIQuota" <<EOF
 #!/bin/bash
 # AIQuota launcher — (re)starts the menu bar app and refreshes the widget.
 INSTALL_DIR="$INSTALL_DIR"
-PLIST="\$HOME/Library/LaunchAgents/com.claudebar.plist"
+PLIST="\$HOME/Library/LaunchAgents/com.aiquotabar.plist"
 DOMAIN="gui/\$(id -u)"
 
 # Menu bar app: kickstart -k restarts it if running, starts it if not.
-if launchctl print "\$DOMAIN/com.claudebar" &>/dev/null; then
-    launchctl kickstart -k "\$DOMAIN/com.claudebar"
+if launchctl print "\$DOMAIN/com.aiquotabar" &>/dev/null; then
+    launchctl kickstart -k "\$DOMAIN/com.aiquotabar"
 elif [ -f "\$PLIST" ]; then
     launchctl bootstrap "\$DOMAIN" "\$PLIST" 2>/dev/null || true
-    launchctl kickstart "\$DOMAIN/com.claudebar" 2>/dev/null || true
+    launchctl kickstart "\$DOMAIN/com.aiquotabar" 2>/dev/null || true
 else
     # No LaunchAgent (manual install) — run the app directly.
-    pkill -f "\$INSTALL_DIR/claude_bar.py" 2>/dev/null || true
+    pkill -f "\$INSTALL_DIR/aiquotabar.py" 2>/dev/null || true
     sleep 1
-    nohup "\$INSTALL_DIR/.venv/bin/python3" "\$INSTALL_DIR/claude_bar.py" &>/dev/null &
+    nohup "\$INSTALL_DIR/.venv/bin/python3" "\$INSTALL_DIR/aiquotabar.py" &>/dev/null &
 fi
 
 # Desktop widget: reload timelines. -n forces a new instance so the arg

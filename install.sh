@@ -1,13 +1,15 @@
 #!/bin/bash
 # AIQuotaBar — one-line installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/yagcioglutoprak/AIQuotaBar/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/CongjieHe/AIQuotaBar/main/install.sh | bash
 
 set -e
 
-REPO="https://github.com/yagcioglutoprak/AIQuotaBar"
+REPO="https://github.com/CongjieHe/AIQuotaBar"
 INSTALL_DIR="$HOME/.ai-quota-bar"
 VENV_DIR="$INSTALL_DIR/.venv"
-PLIST="$HOME/Library/LaunchAgents/com.claudebar.plist"
+PLIST="$HOME/Library/LaunchAgents/com.aiquotabar.plist"
+LEGACY_PLIST="$HOME/Library/LaunchAgents/com.claudebar.plist"
+DATA_DIR="$HOME/Library/Application Support/AIQuotaBar"
 
 echo ""
 echo "  AIQuotaBar — installer"
@@ -64,18 +66,23 @@ echo "  ↓  Installing Python dependencies…"
 echo "  ✓  Dependencies installed"
 
 # ── 5. LaunchAgent (run at login) ─────────────────────────────────────────────
-mkdir -p "$HOME/Library/LaunchAgents"
+mkdir -p "$HOME/Library/LaunchAgents" "$DATA_DIR"
+# Pre-rename installs ran as com.claudebar; the app migrates its data files.
+if [ -f "$LEGACY_PLIST" ]; then
+    launchctl bootout gui/$(id -u) "$LEGACY_PLIST" 2>/dev/null || true
+    rm -f "$LEGACY_PLIST"
+fi
 cat > "$PLIST" <<PLIST_EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.claudebar</string>
+    <string>com.aiquotabar</string>
     <key>ProgramArguments</key>
     <array>
         <string>$PYTHON</string>
-        <string>$INSTALL_DIR/claude_bar.py</string>
+        <string>$INSTALL_DIR/aiquotabar.py</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -85,9 +92,9 @@ cat > "$PLIST" <<PLIST_EOF
         <false/>
     </dict>
     <key>StandardOutPath</key>
-    <string>$HOME/.claude_bar.log</string>
+    <string>$DATA_DIR/aiquotabar.log</string>
     <key>StandardErrorPath</key>
-    <string>$HOME/.claude_bar.log</string>
+    <string>$DATA_DIR/aiquotabar.log</string>
 </dict>
 </plist>
 PLIST_EOF
@@ -144,8 +151,9 @@ fi
 
 # ── 6. Launch now ─────────────────────────────────────────────────────────────
 pkill -f "$INSTALL_DIR/claude_bar.py" 2>/dev/null || true
+pkill -f "$INSTALL_DIR/aiquotabar.py" 2>/dev/null || true
 sleep 1
-"$PYTHON" "$INSTALL_DIR/claude_bar.py" &>/dev/null &
+"$PYTHON" "$INSTALL_DIR/aiquotabar.py" &>/dev/null &
 echo "  ✓  Launched!"
 echo ""
 echo "  Look for the ◆ icon in your menu bar."

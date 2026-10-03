@@ -42,11 +42,11 @@ A native macOS menu bar app (Python + rumps) that shows live Claude, ChatGPT, Cu
 
 ## Architecture
 
-Python package `aiquotabar/` with a thin `claude_bar.py` entry point. No build step. No framework.
+Python package `aiquotabar/` with a thin `aiquotabar.py` entry point. No build step. No framework.
 
 ```
 aiquotabar/
-├── config.py     load_config / save_config  (~/.claude_bar_config.json)
+├── config.py     paths, load_config / save_config, legacy-file migration
 ├── providers.py  Claude API (fetch_raw), fetch_chatgpt / fetch_cursor / fetch_copilot /
 │                 fetch_openai / fetch_minimax / fetch_glm → ProviderData
 │                 PROVIDER_REGISTRY: cfg_key → (name, fetch_fn); COOKIE_PROVIDERS auto-detect
@@ -74,7 +74,7 @@ they all read `pd._rows`.
 
 A native macOS WidgetKit widget in `AIQuotaBarWidget/` shows usage on the desktop.
 
-**Data flow:** `claude_bar.py` → `~/Library/Application Support/AIQuotaBar/usage.json` → WidgetKit reads it.
+**Data flow:** `aiquotabar.py` → `~/Library/Application Support/AIQuotaBar/usage.json` → WidgetKit reads it.
 
 - `_write_widget_cache()` runs after every fetch cycle (atomic write, never crashes main app)
 - It then runs `open -n -g -a AIQuotaBarHost --args --reload-widget` to nudge WidgetKit.
@@ -117,7 +117,7 @@ the next refresh.
   `seven_day_sonnet`) return 0–100 percentage. No conversion needed.
 - **`rumps.notification` crashes** in dev (missing Info.plist CFBundleIdentifier).
   All notifications go through `_notify()` which swallows the exception silently.
-- **Cookies are cached** in `~/.claude_bar_config.json`. Auto-detect runs on first launch
+- **Cookies are cached** in `config.json` (see Local files). Auto-detect runs on first launch
   and on repeated 401/403 failures to silently refresh the session.
 - **Cookie providers self-heal.** ChatGPT/Cursor/Copilot swallow HTTP errors into
   `ProviderData.error`, so `_fetch_providers` checks `is_auth_error()` and re-runs
@@ -152,7 +152,7 @@ of a blank reset slot.
 
 | File            | Purpose                                              |
 |-----------------|------------------------------------------------------|
-| `claude_bar.py` | Entry point (imports `aiquotabar`)                   |
+| `aiquotabar.py` | Entry point (imports `aiquotabar`)                   |
 | `aiquotabar/`   | Application package (see Architecture)               |
 | `install.sh`    | One-line curl installer (detects Python, LaunchAgent)|
 | `make_launcher.sh` | Creates /Applications/AIQuota.app — headless launcher that restarts the menu bar app + reloads the widget (Spotlight: "AIQuota") |
@@ -160,6 +160,24 @@ of a blank reset slot.
 | `setup.sh`      | Legacy manual installer (kept for reference)         |
 | `assets/`       | demo.gif and screenshots for README                  |
 | `AIQuotaBarWidget/` | Optional WidgetKit desktop widget (Xcode project)   |
+
+### Local files
+
+Everything the app writes lives in `~/Library/Application Support/AIQuotaBar/`:
+`config.json` (settings + cached cookies), `aiquotabar.log` (+ `.1`–`.3`),
+`history.json`, `history.db`, `usage.json` (widget cache). The LaunchAgent is
+`com.aiquotabar`. Before the rename these were `~/.claude_bar_config.json`,
+`~/.claude_bar.log`, `~/.claude_bar_history.json` and `com.claudebar`;
+`_migrate_legacy_files()` moves the files on first import of `config.py`, and
+`_add_login_item()` deletes (but does not unload) the old plist, so a legacy job
+keeps running until logout instead of being duplicated.
+
+macOS 27 puts Chrome's cookie DB behind "App Data" privacy protection
+(`TCC denied kTCCServiceSystemPolicyAppDataDetailed for com.google.Chrome`).
+Without Full Disk Access for the venv's real Python binary, every browser
+cookie detection silently returns nothing, so expired sessions never self-heal.
+On the same system `curl_cffi` only imports after CoreFoundation is loaded
+(`ui.py` gets this via `rumps`); standalone scripts must `import CoreFoundation` first.
 
 ## Growth / virality rules
 
@@ -195,16 +213,17 @@ These features would make the app significantly more shareable:
 
 ```bash
 # Run locally
-python3 claude_bar.py
+python3 aiquotabar.py
 
 # Check logs
-tail -f ~/.claude_bar.log
+tail -f ~/Library/Application\ Support/AIQuotaBar/aiquotabar.log
 
 # Quick syntax check
-python3 -m py_compile claude_bar.py
+python3 -m py_compile aiquotabar.py
 
 # Kill and restart
-pkill -f claude_bar.py; sleep 1; python3 claude_bar.py &
+launchctl kickstart -k gui/$(id -u)/com.aiquotabar   # LaunchAgent install
+pkill -f aiquotabar.py; sleep 1; python3 aiquotabar.py &   # manual run
 ```
 
 ## Do not
@@ -221,7 +240,10 @@ pkill -f claude_bar.py; sleep 1; python3 claude_bar.py &
 - Do not add a `session_key` field — the app uses full cookie strings, not just the session key.
 - Do not multiply utilization values by 100 — all fields now return 0–100 percentages directly.
 - Do not call `rumps.notification()` directly — always use `_notify()`.
-- Do not store cookies in plaintext anywhere other than `~/.claude_bar_config.json` (which is gitignored).
+- Do not store cookies in plaintext anywhere other than `config.json` in the app data dir (outside the repo).
+- Do not import `aiquotabar.config` in a script or test with the real `$HOME` unless you mean to:
+  the import runs the legacy-file migration, and `set_provider_disabled` saves through
+  `config.save_config` (patching `ui.save_config` does not stop it). Point `HOME` at a temp dir.
 - Do not add Electron, a web server, or any always-on background process beyond the menu bar app itself.
 - Do not make the README longer than it already is — trim if anything.
 - Do not add features that don't drive stars or retention. Every line of code should serve growth.

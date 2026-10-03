@@ -7,10 +7,6 @@ import WidgetKit
 enum AIProvider: String, AppEnum, CaseIterable, Codable {
     case claude, chatgpt, cursor, copilot, none
 
-    // Keep the case so previously saved widget intents still decode, but do
-    // not offer Claude as a selectable/displayable provider anymore.
-    static var allCases: [AIProvider] { [.chatgpt, .cursor, .copilot, .none] }
-
     static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "AI Provider")
     static var caseDisplayRepresentations: [AIProvider: DisplayRepresentation] = [
         .claude:  "Claude",
@@ -69,7 +65,7 @@ struct SelectProvidersIntent: WidgetConfigurationIntent {
     static var title: LocalizedStringResource = "Select Providers"
     static var description = IntentDescription("Choose which AI providers to display in the widget.")
 
-    @Parameter(title: "Provider 1", default: .chatgpt)
+    @Parameter(title: "Provider 1", default: .claude)
     var provider1: AIProvider
 
     @Parameter(title: "Provider 2", default: .cursor)
@@ -88,16 +84,19 @@ struct SelectProvidersIntent: WidgetConfigurationIntent {
 
     /// Active (non-none) providers in order.
     var activeProviders: [AIProvider] {
-        [provider1, provider2, provider3, provider4]
-            .filter { $0.isReal && $0 != .claude }
+        [provider1, provider2, provider3, provider4].filter(\.isReal)
     }
 
     /// True when user hasn't touched the widget config (all slots at compile-time defaults).
+    /// Widgets added under earlier builds keep the defaults of that build, so
+    /// every default pair this intent has ever shipped counts as untouched.
     var isUsingDefaults: Bool {
         let trailingSlotsEmpty = provider3 == .none && provider4 == .none
-        let currentDefaults = provider1 == .chatgpt && provider2 == .cursor
-        let legacyDefaults = provider1 == .claude && provider2 == .chatgpt
-        return trailingSlotsEmpty && (currentDefaults || legacyDefaults)
+        let defaultPairs: [(AIProvider, AIProvider)] = [
+            (.claude, .cursor), (.claude, .chatgpt), (.chatgpt, .cursor),
+        ]
+        return trailingSlotsEmpty
+            && defaultPairs.contains { $0 == provider1 && $1 == provider2 }
     }
 }
 

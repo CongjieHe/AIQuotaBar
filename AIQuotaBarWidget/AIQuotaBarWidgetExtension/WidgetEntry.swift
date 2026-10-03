@@ -27,17 +27,17 @@ struct QuotaEntry: TimelineEntry {
             claudeCode: ClaudeCodeUsage(todayMessages: 42, weekMessages: 312),
             cursor: nil,
             copilot: nil,
-            activeProviders: ["chatgpt", "cursor"],
+            activeProviders: ["claude", "cursor"],
             barProviders: nil
         ),
         isStale: false,
-        providers: [.chatgpt, .cursor]
+        providers: [.claude, .cursor]
     )
 
     static let empty = QuotaEntry(
         date: .now,
         snapshot: nil,
         isStale: false,
-        providers: [.chatgpt, .cursor]
+        providers: [.claude, .cursor]
     )
 }

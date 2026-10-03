@@ -154,10 +154,10 @@ cd AIQuotaBarWidget && ./build_widget.sh
 ## Manual install
 
 ```bash
-git clone https://github.com/yagcioglutoprak/AIQuotaBar.git
+git clone https://github.com/CongjieHe/AIQuotaBar.git
 cd AIQuotaBar
 pip install -r requirements.txt
-python3 claude_bar.py
+python3 aiquotabar.py
 ```
 
 ---
@@ -181,7 +181,7 @@ The app calls the same private usage API that `claude.ai/settings/usage` uses. I
 
 **App doesn't appear in menu bar**
 ```bash
-tail -50 ~/.claude_bar.log
+tail -50 ~/Library/Application\ Support/AIQuotaBar/aiquotabar.log
 ```
 
 **Cookies not detected**
@@ -209,7 +209,7 @@ The app will try to auto-detect fresh cookies from your browser. If that fails, 
 
 ## Contributing
 
-PRs welcome. Open an issue first for large changes. See [Manual install](#manual-install) for dev setup. Logs: `~/.claude_bar.log`.
+PRs welcome. Open an issue first for large changes. See [Manual install](#manual-install) for dev setup. Logs: `~/Library/Application Support/AIQuotaBar/aiquotabar.log`.
 
 ---
 

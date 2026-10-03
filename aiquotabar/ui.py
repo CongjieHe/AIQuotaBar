@@ -18,7 +18,9 @@ from aiquotabar.config import (
     REFRESH_INTERVALS, DEFAULT_REFRESH,
     WARN_THRESHOLD, CRIT_THRESHOLD, PACING_ALERT_MINUTES,
     UPDATE_CHECK_INTERVAL, HISTORY_COLORS,
-    WIDGET_CACHE_DIR,
+    WIDGET_CACHE_DIR, LOG_FILE,
+    LAUNCH_AGENT_LABEL, LAUNCH_AGENT_PLIST,
+    LEGACY_LAUNCH_AGENT_LABEL, LEGACY_LAUNCH_AGENT_PLIST,
 )
 from aiquotabar.providers import (
     LimitRow, UsageData, ProviderData, parse_usage, fetch_raw,
@@ -902,55 +904,56 @@ def _section_header_mi(title: str, icon_filename: str | None,
 def _script_path() -> str:
     # The LaunchAgent must launch the package entry shim, not this module
     # file: `python3 .../aiquotabar/ui.py` fails (the aiquotabar package is
-    # not importable that way and ui.py has no __main__ guard). claude_bar.py
+    # not importable that way and ui.py has no __main__ guard). aiquotabar.py
     # lives at the repo root and puts that root on sys.path so the package
     # resolves. Fall back to this file only if the shim is somehow missing.
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    shim = os.path.join(root, "claude_bar.py")
+    shim = os.path.join(root, "aiquotabar.py")
     return shim if os.path.exists(shim) else os.path.abspath(__file__)
 
 
 def _is_login_item() -> bool:
-    try:
-        result = subprocess.run(
-            ["osascript", "-e",
-             'tell application "System Events" to get the name of every login item'],
-            capture_output=True, text=True, timeout=10,
-        )
-        return "claude_bar" in result.stdout.lower()
-    except Exception:
-        return False
+    # The app starts at login through its LaunchAgent, not a System Events
+    # login item -- querying login items never matched, so every launch
+    # rewrote and re-loaded the plist.
+    return os.path.exists(LAUNCH_AGENT_PLIST)
 
 
 def _add_login_item():
     import plistlib
     path = _script_path()
-    plist = os.path.expanduser("~/Library/LaunchAgents/com.claudebar.plist")
     python_exe = sys.executable
     plist_data = {
-        "Label": "com.claudebar",
+        "Label": LAUNCH_AGENT_LABEL,
         "ProgramArguments": [python_exe, path],
         "RunAtLoad": True,
         # Respawn only on an abnormal exit (crash / killed by signal); a
-        # clean Quit (exit 0) stays quit. _restart_app() uses os.execv, which
-        # replaces the process in place (same PID, no exit), so the
-        # self-updater never trips a launchd respawn.
+        # clean Quit (exit 0) stays quit. The updater exits nonzero so launchd
+        # starts a fresh PID; in-place exec breaks macOS 26 status-item scenes.
         "KeepAlive": {"SuccessfulExit": False},
-        "StandardOutPath": os.path.expanduser("~/.claude_bar.log"),
-        "StandardErrorPath": os.path.expanduser("~/.claude_bar.log"),
+        "StandardOutPath": LOG_FILE,
+        "StandardErrorPath": LOG_FILE,
     }
-    with open(plist, "wb") as f:
+    os.makedirs(os.path.dirname(LAUNCH_AGENT_PLIST), exist_ok=True)
+    with open(LAUNCH_AGENT_PLIST, "wb") as f:
         plistlib.dump(plist_data, f)
-    result = subprocess.run(["launchctl", "load", plist], capture_output=True)
+    if os.path.exists(LEGACY_LAUNCH_AGENT_PLIST):
+        # Pre-rename install: drop the old plist so only the new label loads
+        # at next login. Don't unload it -- if this process is that job, the
+        # unload kills it, and loading the new label now starts a duplicate.
+        os.remove(LEGACY_LAUNCH_AGENT_PLIST)
+        if os.environ.get("XPC_SERVICE_NAME") == LEGACY_LAUNCH_AGENT_LABEL:
+            return
+    result = subprocess.run(["launchctl", "load", LAUNCH_AGENT_PLIST], capture_output=True)
     if result.returncode != 0:
         log.warning("launchctl load failed: %s", result.stderr.decode(errors="replace"))
 
 
 def _remove_login_item():
-    plist = os.path.expanduser("~/Library/LaunchAgents/com.claudebar.plist")
-    if os.path.exists(plist):
-        subprocess.run(["launchctl", "unload", plist], capture_output=True)
-        os.remove(plist)
+    for plist in (LAUNCH_AGENT_PLIST, LEGACY_LAUNCH_AGENT_PLIST):
+        if os.path.exists(plist):
+            subprocess.run(["launchctl", "unload", plist], capture_output=True)
+            os.remove(plist)
 
 
 # -- native macOS dialogs via osascript ----------------------------------------
@@ -1535,10 +1538,49 @@ class _UsagePanel:
         y += 1 + self.SECTION_GAP
 
         # ── Provider sections ───────────────────────────────────────────
+        data = self._app._last_data
         provider_data = self._app._provider_data
         history = self._app._history
+        history_db = self._app._history_db
 
         has_any_data = False
+
+        # Claude section
+        if data and any([data.session, data.weekly_all, data.weekly_sonnet, *data.scoped]):
+            has_any_data = True
+            # Provider header: dot + name + reset time
+            elements.append(('provider_header', y, 18, 'Claude', '#D97757',
+                             data.session.reset_str if data.session else ''))
+            y += 18 + 6
+
+            # Rows
+            for row in [data.session, data.weekly_all, data.weekly_sonnet, *data.scoped]:
+                if row:
+                    elements.append(('limit_row', y, 20, row, '#D97757'))
+                    y += 20 + self.ROW_GAP
+
+            # ETA
+            eta = _calc_eta_minutes(history, "claude")
+            if eta is not None:
+                elements.append(('eta_line', y, 14, eta))
+                y += 14 + 2
+
+            # Sparkline
+            spark = _sparkline(history, "claude")
+            if spark:
+                elements.append(('spark_line', y, 14, spark))
+                y += 14 + 2
+
+            # Hit limit count
+            try:
+                hits = _get_week_limit_hits(history_db, "claude")
+            except Exception:
+                hits = 0
+            if hits > 0:
+                elements.append(('hit_line', y, 14, hits))
+                y += 14 + 2
+
+            y += self.SECTION_GAP
 
         # ChatGPT section
         chatgpt_pd = next((pd for pd in provider_data if pd.name == "ChatGPT"), None)
@@ -1897,16 +1939,6 @@ class ClaudeBar(rumps.App):
     def __init__(self):
         super().__init__("\u25c6", quit_button=None)
         self.config = load_config()
-        # Migrate status-bar selections saved by versions that offered Claude.
-        chosen_bar = self.config.get("bar_providers")
-        if chosen_bar:
-            visible_bar = [name for name in chosen_bar if name in self._BAR_PROVIDERS]
-            if visible_bar != chosen_bar:
-                if visible_bar:
-                    self.config["bar_providers"] = visible_bar
-                else:
-                    self.config.pop("bar_providers", None)
-                save_config(self.config)
         self._last_raw: dict = {}
         self._last_data: UsageData | None = None
         self._provider_data: list[ProviderData] = []
@@ -1977,6 +2009,41 @@ class ClaudeBar(rumps.App):
 
     def _rebuild_menu(self, data: UsageData | None):
         items: list = []
+
+        # -- CLAUDE section ---------------------------------------------------
+        items.append(_section_header_mi("  Claude", "claude_icon.png", "#D97757"))
+
+        if data is None or not any([data.session, data.weekly_all, data.weekly_sonnet,
+                                    *(data.scoped if data else [])]):
+            items.append(_mi("  No data \u2014 click Auto-detect from Browser"))
+        else:
+            if data.session:
+                lines = _row_lines(data.session)
+                items.append(_mi(lines[0]))
+                items.append(_colored_mi(lines[1], "#D97757"))
+                # ETA + sparkline for Claude session
+                eta = _calc_eta_minutes(self._history, "claude")
+                if eta is not None:
+                    items.append(_mi(f"  \u23f1 Limit in ~{_fmt_eta(eta)}"))
+                spark = _sparkline(self._history, "claude")
+                if spark:
+                    items.append(_mi(f"  {spark}"))
+                    items.append(_mi(f"  \U0001f4c8 24h usage trend"))
+                try:
+                    hits = _get_week_limit_hits(self._history_db, "claude")
+                except Exception:
+                    hits = 0
+                if hits > 0:
+                    items.append(_mi(f"  Hit limit {hits}x this week"))
+                items.append(None)
+
+            for row in [data.weekly_all, data.weekly_sonnet, *data.scoped]:
+                if row:
+                    lines = _row_lines(row)
+                    items.append(_mi(lines[0]))
+                    items.append(_colored_mi(lines[1], "#D97757"))
+                    items.append(None)
+
 
         # -- CHATGPT section (if detected or explicitly chosen) ---------------
         chosen_bar = self.config.get("bar_providers") or []
@@ -2087,6 +2154,26 @@ class ClaudeBar(rumps.App):
                         items.append(_mi(line))
                 items.append(None)
 
+        # -- CLAUDE CODE section ----------------------------------------------
+        if self._cc_stats:
+            cc = self._cc_stats
+            items.append(_section_header_mi("  Claude Code", "claude_icon.png", "#D97757"))
+            if cc["today_messages"] > 0:
+                items.append(_mi(
+                    f"  Today     {_fmt_count(cc['today_messages'])} msgs"
+                    f"  \u00b7  {cc['today_sessions']} sessions"
+                ))
+            wm = cc["week_messages"]
+            if wm > 0:
+                items.append(_mi(
+                    f"  This week  {_fmt_count(wm)} msgs"
+                    f"  \u00b7  {cc['week_sessions']} sessions"
+                    f"  \u00b7  {_fmt_count(cc['week_tool_calls'])} tools"
+                ))
+            if cc.get("last_date"):
+                items.append(_mi(f"  Last active  {cc['last_date']}"))
+            items.append(None)
+
         # -- Other API providers ----------------------------------------------
         for pd in self._provider_data:
             if pd.name in ("ChatGPT", "Copilot", "Cursor"):
@@ -2131,7 +2218,7 @@ class ClaudeBar(rumps.App):
         chosen = self.config.get("bar_providers") or []
         # In auto mode, compute which providers would be shown
         if not chosen:
-            available_names = set()
+            available_names = {"Claude"} if self._claude_has_data() else set()
             for pd in self._provider_data:
                 if self._provider_bar_pct(pd) is not None:
                     available_names.add(pd.name)
@@ -2436,36 +2523,70 @@ class ClaudeBar(rumps.App):
             self._fetching = True
         threading.Thread(target=self._fetch_and_update, daemon=True).start()
 
+    def _fetch_claude(self) -> UsageData:
+        """Fetch Claude usage without ever raising.
+
+        A Claude failure must not block the other providers, the bar or the
+        widget. Network errors (claude.ai timeouts are common) keep the last
+        good snapshot so the bar doesn't flicker; auth errors drop it, and on
+        repeated 401/403 fresh cookies are re-read from the browser.
+        """
+        try:
+            with self._config_lock:
+                sk = self.config.get("cookie_str")
+            if not sk:
+                sk = _auto_detect_cookies()
+                if not sk:
+                    return UsageData()
+                with self._config_lock:
+                    self.config["cookie_str"] = sk
+                    save_config(self.config)
+            raw = fetch_raw(sk)
+        except CurlHTTPError as e:
+            resp = getattr(e, "response", None)
+            code = getattr(resp, "status_code", 0) or 0
+            log.warning("Claude fetch failed (status=%s): %s", code, e)
+            if code not in (401, 403):
+                return self._last_data or UsageData()
+            self._auth_fail_count += 1
+            if self._auth_fail_count < 2:
+                return UsageData()
+            self._auth_fail_count = 0
+            cookie_str = _auto_detect_cookies()
+            with self._config_lock:
+                stale = cookie_str == self.config.get("cookie_str")
+            if not cookie_str or stale:
+                _notify(
+                    "Claude Usage Bar",
+                    "Session expired \u2014 please update your cookie",
+                    "Click: Set Session Cookie\u2026 or Auto-detect from Browser",
+                )
+                return UsageData()
+            with self._config_lock:
+                self.config["cookie_str"] = cookie_str
+                save_config(self.config)
+            self._warned_pcts.clear()
+            log.info("Auth failed \u2014 auto-detected fresh cookies from browser")
+            try:
+                raw = fetch_raw(cookie_str)
+            except Exception:
+                log.exception("Claude re-fetch after cookie re-detect failed")
+                return UsageData()
+        except Exception:
+            log.exception("Claude fetch failed")
+            return self._last_data or UsageData()
+
+        self._last_raw = raw
+        self._auth_fail_count = 0
+        data = parse_usage(raw)
+        log.debug("parsed UsageData: %s", data)
+        self._check_warnings(data)
+        return data
+
     def _fetch_and_update(self):
 
         try:
-            # Claude is no longer a visible provider. Its legacy fetch remains
-            # best-effort for history/cache compatibility, but it must never
-            # block the providers that actually drive the bar and widget.
-            data = UsageData()
-            try:
-                with self._config_lock:
-                    sk = self.config.get("cookie_str")
-                if not sk:
-                    sk = _auto_detect_cookies()
-                    if sk:
-                        with self._config_lock:
-                            self.config["cookie_str"] = sk
-                            save_config(self.config)
-                if sk:
-                    raw = fetch_raw(sk)
-                    self._last_raw = raw
-                    self._auth_fail_count = 0
-                    data = parse_usage(raw)
-                    log.debug("parsed UsageData: %s", data)
-                    self._check_warnings(data)
-            except CurlHTTPError as e:
-                resp = getattr(e, "response", None)
-                code = getattr(resp, "status_code", 0) or 0
-                log.warning("Claude fetch failed (status=%s): %s", code, e)
-            except Exception:
-                log.exception("Claude fetch failed")
-
+            data = self._fetch_claude()
             self._last_data = data
             self._last_updated = datetime.now()
             self._fetch_providers()
@@ -2673,16 +2794,18 @@ class ClaudeBar(rumps.App):
 
     # Bar icon/color config per provider name
     _BAR_PROVIDERS = {
+        "Claude":  {"icon": "claude_icon.png",        "tint": None,      "color": "#D97757", "sym": "\u25cf"},
         "ChatGPT": {"icon": "chatgpt_icon_clean.png", "tint": "#74AA9C", "color": "#74AA9C", "sym": "\u25c7"},
         "Cursor":  {"icon": "cursor.png",             "tint": "#6699FF", "color": "#6699FF", "sym": "\u25c8"},
         "Copilot": {"icon": "copilot.png",            "tint": "#8CBFF3", "color": "#8CBFF3", "sym": "\u25c6"},
     }
 
-    def _set_bar_title(self, provider_segments: list[tuple[str, int | None, str]]):
+    def _set_bar_title(self, provider_segments: list[tuple[str, int | None, str]],
+                       cc_msgs: int | None = None):
         """Multi-indicator attributed title with brand logo icons.
 
         provider_segments: list of (provider_name, pct, extra_suffix)
-          e.g. [("ChatGPT", 36, ""), ("Cursor", 12, "")]
+          e.g. [("Claude", 36, " \u00b7"), ("ChatGPT", 12, "")]
         pct=None renders an en-dash placeholder (provider chosen but no data).
 
         Falls back to colored text symbols if AppKit / icons unavailable.
@@ -2729,6 +2852,15 @@ class ClaudeBar(rumps.App):
                     NSAttributedString.alloc().initWithString_attributes_(f" {pct_str}{suffix}", base)
                 )
 
+            # -- Claude Code  diamond 3.2k --
+            if cc_msgs is not None and cc_msgs > 0:
+                cc_color = _rgb("#D97757")
+                seg = NSMutableAttributedString.alloc().initWithString_attributes_(
+                    f"   \u25c6 {_fmt_count(cc_msgs)}", base
+                )
+                seg.addAttribute_value_range_(NSForegroundColorAttributeName, cc_color, (3, 2))
+                s.appendAttributedString_(seg)
+
             self._nsapp.nsstatusitem.setAttributedTitle_(s)
             return
         except Exception as e:
@@ -2740,7 +2872,14 @@ class ClaudeBar(rumps.App):
             sym = cfg.get("sym", "\u25cf")
             pct_str = f"{pct}%" if pct is not None else "\u2013"
             parts.append(f"{sym} {pct_str}{suffix}")
+        if cc_msgs is not None and cc_msgs > 0:
+            parts.append(f"\u25c6 {_fmt_count(cc_msgs)}")
         self.title = "  ".join(parts)
+
+    def _claude_has_data(self) -> bool:
+        """True when the last Claude fetch produced a row the bar can show."""
+        d = self._last_data
+        return bool(d and (d.session or d.weekly_all or d.weekly_sonnet))
 
     def _provider_bar_pct(self, pd: ProviderData) -> int | None:
         """Extract a single percentage for the menu bar from a provider."""
@@ -2754,21 +2893,31 @@ class ClaudeBar(rumps.App):
         return None
 
     # Priority order for the 2 bar slots (highest first)
-    _BAR_PRIORITY = ["ChatGPT", "Cursor", "Copilot"]
+    _BAR_PRIORITY = ["Claude", "ChatGPT", "Cursor", "Copilot"]
 
     def _apply(self, data: UsageData):
-        # Claude remains in the fetched snapshot for compatibility/history, but
-        # it is deliberately excluded from every status-bar segment.
+        # Collect all available segments. Claude is one segment among the
+        # others: a failed Claude fetch must not blank the whole bar.
         available: dict[str, tuple[str, int, str]] = {}
+        primary = data.session or data.weekly_all or data.weekly_sonnet
+        if primary:
+            weekly_maxed = any(
+                r and r.pct >= CRIT_THRESHOLD
+                for r in [data.weekly_all, data.weekly_sonnet, *data.scoped]
+            )
+            extra = " \u00b7" if (weekly_maxed and primary is data.session
+                             and primary.pct < CRIT_THRESHOLD) else ""
+            available["Claude"] = ("Claude", primary.pct, extra)
         for pd in self._provider_data:
             bar_pct = self._provider_bar_pct(pd)
-            if pd.name in self._BAR_PROVIDERS and bar_pct is not None:
+            if bar_pct is not None:
                 available[pd.name] = (pd.name, bar_pct, "")
 
-        # User-configured bar providers, or auto top 2 by priority. Filtering
-        # through _BAR_PROVIDERS also removes stale Claude selections.
+        # User-configured bar providers, or auto top 2 by priority
         chosen = self.config.get("bar_providers")
         if chosen:
+            # Explicitly chosen providers always get a slot; ones with no
+            # data yet (not logged in / fetch error) show a "–" placeholder.
             segments = [
                 available.get(n, (n, None, ""))
                 for n in chosen if n in self._BAR_PROVIDERS
@@ -2777,8 +2926,13 @@ class ClaudeBar(rumps.App):
             segments = [available[n] for n in self._BAR_PRIORITY
                         if n in available][:2]
 
+        # Claude Code weekly messages
+        cc_msgs: int | None = None
+        if self._cc_stats:
+            cc_msgs = self._cc_stats.get("week_messages")
+
         if segments:
-            self._set_bar_title(segments)
+            self._set_bar_title(segments, cc_msgs=cc_msgs)
         else:
             self.title = "\u25c6"
         self._rebuild_menu(data)
@@ -2979,6 +3133,15 @@ class ClaudeBar(rumps.App):
         def _cb(sender):
             disable = not provider_disabled(self.config, cfg_key)
             with self._config_lock:
+                if disable:
+                    # An explicit bar choice would otherwise keep a "–" slot
+                    # (and a "Not logged in" menu section) for this provider.
+                    chosen = [n for n in self.config.get("bar_providers") or []
+                              if n != name]
+                    if chosen:
+                        self.config["bar_providers"] = chosen
+                    else:
+                        self.config.pop("bar_providers", None)
                 set_provider_disabled(self.config, cfg_key, disable)
             sender._menuitem.setState_(0 if disable else 1)
             if disable:
@@ -3003,6 +3166,7 @@ class ClaudeBar(rumps.App):
         return _cb
 
     _TOGGLE_ICONS = {
+        "Claude":  ("claude_icon.png",        None),
         "ChatGPT": ("chatgpt_icon_clean.png", "#74AA9C"),
         "Cursor":  ("cursor.png",             "#6699FF"),
         "Copilot": ("copilot.png",            "#8CBFF3"),
@@ -3082,7 +3246,7 @@ class ClaudeBar(rumps.App):
         chosen = self.config.get("bar_providers")
         if not chosen:
             # Switching from auto -> manual: seed with current auto selection
-            available_names = set()
+            available_names = {"Claude"} if self._claude_has_data() else set()
             for pd in self._provider_data:
                 if self._provider_bar_pct(pd) is not None:
                     available_names.add(pd.name)
@@ -3101,7 +3265,7 @@ class ClaudeBar(rumps.App):
         # Update all toggle views in-place (no menu rebuild needed)
         effective = self.config.get("bar_providers")
         if not effective:
-            available_names = set()
+            available_names = {"Claude"} if self._claude_has_data() else set()
             for pd in self._provider_data:
                 if self._provider_bar_pct(pd) is not None:
                     available_names.add(pd.name)

@@ -2,8 +2,8 @@
 """AIQuotaBar -- backwards-compatible entry point.
 
 The real code lives in the aiquotabar/ package.
-This shim keeps `python3 claude_bar.py` working for
-install.sh, LaunchAgent, and existing users.
+This shim keeps `python3 aiquotabar.py` working for
+install.sh and the LaunchAgent.
 """
 from aiquotabar.__main__ import main
 
