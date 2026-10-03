@@ -13,9 +13,6 @@ build/
 venv/
 env/
 
-# User data (contains session cookies — never commit!)
-.claude_bar_config.json
-
 # Logs
 *.log
 

@@ -1,44 +1,18 @@
-# CLAUDE.md — AIQuotaBar
-
-## Project goal
-
-**Get maximum GitHub stars and widespread adoption.**
-North star: **225 stars** (threshold to resubmit homebrew-core PR).
-Every change must either (a) convert more visitors to stars, (b) bring new visitors, or (c) make the app so good people share it organically.
-
-### Current stats (2026-03-01)
-- 6 stars, 0 forks
-- Early stage — need to build real traction from scratch
-
-### Growth priorities (in order)
-1. **Fix star conversion** — README must convince in 5 seconds (hook → GIF → install)
-2. **Social proof loop** — HN/PH badges, testimonials, star count badge visible
-3. **Distribution** — awesome-lists, Reddit, dev.to, Twitter/X, YouTube demos
-4. **Shareability features** — screenshot/share menu item, referral nudges in-app
-5. **Cross-platform** — Linux tray port opens 70% more developers
-6. **SEO** — GitHub Pages landing page, proper meta tags, backlinks
-
-### Channel status
-| Channel | Status | Next action |
-|---------|--------|-------------|
-| HN | Show HN posted | Repost if no traction |
-| Product Hunt | Not submitted | Submit on a Tuesday 12:01 AM PST |
-| awesome-mac PR #1833 | Open | Follow up if stale >7d |
-| open-source-mac-os-apps PR #1041 | Open | Follow up if stale >7d |
-| awesome-claude PR #60 | Open | Follow up if stale >7d |
-| awesome-claude-code #888 | Auto-closed | Resubmit after 2026-03-05 |
-| Reddit r/ClaudeAI | Rejected once | Repost with value-first copy |
-| Reddit r/ChatGPT, r/macapps, r/commandline | Not posted | Post with screenshots |
-| AlternativeTo | Listed | Done |
-| dev.to | Published | Done |
-| Twitter/X | Not posted | Post demo GIF + install command |
-| GitHub Pages | Live | Improve SEO meta tags |
-| Homebrew core | Needs 225 stars | Blocked on stars |
-| Indie Hackers | Blocked (new account) | Build karma via comments |
+# CLAUDE.md — AIQuotaBar (personal fork)
 
 ## What this is
 
-A native macOS menu bar app (Python + rumps) that shows live Claude, ChatGPT, Cursor, and GitHub Copilot usage limits. It reads cookies from the user's browser (no manual copy-paste), calls provider APIs, and displays the result as a status bar icon (`🟢 4%`, `🟡 83%`, `🔴 100%`).
+A personal fork of [yagcioglutoprak/AIQuotaBar](https://github.com/yagcioglutoprak/AIQuotaBar):
+a native macOS menu bar app (Python + rumps) plus an optional WidgetKit widget that
+show live AI usage limits. It reads session cookies from the browser, calls each
+provider's usage API, and renders brand icon + percentage per provider in the menu bar.
+
+- `origin` = `CongjieHe/AIQuotaBar` (this fork; the auto-updater pulls `origin/main`),
+  `upstream` = the original repo. The fork has diverged (renamed files, removed
+  Copilot and the share/star UI), so upstream changes need manual porting.
+- Shown today: **Claude + Cursor**. ChatGPT is still supported in code but switched
+  off via **Show Providers** (`disabled_providers`) — hide providers with that toggle,
+  not by deleting display code. OpenAI / MiniMax / GLM are optional API-key providers.
 
 ## Architecture
 
@@ -47,15 +21,20 @@ Python package `aiquotabar/` with a thin `aiquotabar.py` entry point. No build s
 ```
 aiquotabar/
 ├── config.py     paths, load_config / save_config, legacy-file migration
-├── providers.py  Claude API (fetch_raw), fetch_chatgpt / fetch_cursor / fetch_copilot /
+├── providers.py  Claude API (fetch_raw/parse_usage), fetch_chatgpt / fetch_cursor /
 │                 fetch_openai / fetch_minimax / fetch_glm → ProviderData
 │                 PROVIDER_REGISTRY: cfg_key → (name, fetch_fn); COOKIE_PROVIDERS auto-detect
 │                 Cookie mgmt: _auto_detect_*_cookies → browser-cookie3 (crash-safe subprocess)
-├── ui.py         ClaudeBar(rumps.App) — timer, menu rebuild, bar title, callbacks
-├── history.py    SQLite usage history (~/Library/Application Support/AIQuotaBar/history.db)
+├── ui.py         ClaudeBar(rumps.App) — timer, floating panel, menu, bar title, callbacks
+├── history.py    usage history: history.json (24h, ETA/sparklines) + SQLite history.db
 ├── widget.py     _write_widget_cache → usage.json for the WidgetKit widget
-└── update.py     update check
+└── update.py     silent git fast-forward + restart
 ```
+
+Claude is not in `PROVIDER_REGISTRY`: it has its own fetch (`_fetch_claude`) and
+always shows when it returns rows. It must never block the other providers — a
+network error keeps the last snapshot, repeated 401/403 re-detects browser cookies
+and retries once.
 
 Note: Cursor's `usage-summary` API has two response shapes — individual plans return
 `individualUsage.plan.*PercentUsed`; enterprise/team plans have no `plan` block and
@@ -67,12 +46,13 @@ Note: ChatGPT's `wham/usage` returns `additional_rate_limits[]` — per-model si
 buckets alongside the main `rate_limit`. `_WHAM_HIDDEN_LIMITS` in `providers.py`
 filters these by `limit_name` substring; "spark" is hidden because Codex-Spark is a
 speed-optimised preview model that is never the user's real ceiling. Filtering at
-`_parse_wham_usage` covers the menu, the bar, the share card and the widget at once —
+`_parse_wham_usage` covers the menu, the bar, the panel and the widget at once —
 they all read `pd._rows`.
 
 ## Widget (optional)
 
 A native macOS WidgetKit widget in `AIQuotaBarWidget/` shows usage on the desktop.
+Build and install with `AIQuotaBarWidget/build_widget.sh` (needs Xcode).
 
 **Data flow:** `aiquotabar.py` → `~/Library/Application Support/AIQuotaBar/usage.json` → WidgetKit reads it.
 
@@ -91,8 +71,9 @@ A native macOS WidgetKit widget in `AIQuotaBarWidget/` shows usage on the deskto
   mirrors `UsageData.scoped`. New keys are optional in Swift so an older cache
   still decodes; a *missing* non-optional key makes `JSONDecoder` return nil and
   the widget silently falls back to "no data".
-- Small widget: circular gauge (Claude session %). Medium: side-by-side bars
-- Requires Xcode 15+ to build; entirely optional — menu bar app works without it
+- An untouched widget (intent still on a shipped default pair, see `isUsingDefaults`)
+  follows the menu bar's provider choice via `bar_providers` in `usage.json`.
+- Small widget: icon + percentage per provider. Medium: side-by-side bars.
 
 ## Adding a new provider
 
@@ -102,35 +83,41 @@ A native macOS WidgetKit widget in `AIQuotaBarWidget/` shows usage on the deskto
 
 Users can switch any registry provider off via **Show Providers** in the menu. This
 stores the cfg_key in `disabled_providers` (see `provider_disabled` in `config.py`);
-a disabled provider is skipped by cookie auto-detect *and* by the fetch task list, so
-it vanishes from the menu, bar, share card and widget at once. Note this is stronger
-than "not configured" — without it, auto-detect would silently re-add the provider on
-the next refresh.
+a disabled provider is skipped by cookie auto-detect *and* by the fetch task list,
+and is dropped from an explicit `bar_providers` choice, so it vanishes from the menu,
+bar, panel and widget at once. This is stronger than "not configured" — without it,
+auto-detect would silently re-add the provider on the next refresh.
 
 ## Key decisions to preserve
 
-- **Session (5-hour) drives the status bar icon**, not the max of all limits.
-  Weekly limits appear in the menu only. Rationale: session determines immediate access.
-- **Firefox/LibreWolf first** in browser detection order — no Keychain prompt, zero friction.
-  Chromium browsers (Arc, Chrome, Brave) come after; they need one-time "Always Allow".
-- **API utilization scale is now consistent**: all fields (`five_hour`, `seven_day`,
-  `seven_day_sonnet`) return 0–100 percentage. No conversion needed.
+- **Session (5-hour) drives Claude's menu bar number**, not the max of all limits.
+  Weekly limits appear in the menu/panel only. Session determines immediate access.
+- **Firefox/LibreWolf first** in browser detection order — no Keychain prompt.
+  Chromium browsers (Chrome, Arc, Brave, ...) come after; they need one-time "Always Allow".
+- **API utilization is 0–100 everywhere** (`five_hour`, `seven_day`, `seven_day_sonnet`,
+  `limits[].percent`). No conversion needed.
 - **`rumps.notification` crashes** in dev (missing Info.plist CFBundleIdentifier).
   All notifications go through `_notify()` which swallows the exception silently.
-- **Cookies are cached** in `config.json` (see Local files). Auto-detect runs on first launch
-  and on repeated 401/403 failures to silently refresh the session.
-- **Cookie providers self-heal.** ChatGPT/Cursor/Copilot swallow HTTP errors into
+- **Cookies are cached** in `config.json` (see Local files). Auto-detect runs when no
+  cookie is saved and on repeated 401/403 failures to silently refresh the session.
+- **Cookie providers self-heal.** ChatGPT/Cursor swallow HTTP errors into
   `ProviderData.error`, so `_fetch_providers` checks `is_auth_error()` and re-runs
   browser detection + one retry (15-min per-provider cooldown, `_redetect_cookies`).
-  Without this a stale cached session made the provider silently vanish from the bar
-  forever, since first-launch detection only fires when no key is saved at all.
+- **Restarts always get a new PID.** On macOS 26+, re-exec'ing the AppKit process in
+  place (`os.execv`) left Control Center holding the old process incarnation and
+  rejecting every status-item scene — the app kept running with no menu bar icon.
+  The updater exits 75 so launchd (`KeepAlive.SuccessfulExit=false`) respawns it, or
+  spawns a new process for manual runs. It also only fast-forwards when HEAD is a
+  strict ancestor of `origin/main`, and skips dirty trees.
 
 ## API behaviour (confirmed)
 
 ```
 GET https://claude.ai/api/organizations/{org_id}/usage
 ```
-Requires Cloudflare bypass — use `curl_cffi` with `impersonate="chrome131"`.
+Requires Cloudflare bypass — `curl_cffi` with `impersonate="safari184"` (Cloudflare
+fingerprint-checks Chrome harder), and the Cloudflare cookies (`cf_clearance`,
+`__cf_bm`, `_cfuvid`) stripped, since they are bound to the real browser's TLS stack.
 
 Response fields:
 | Field              | Meaning                        | Utilization scale |
@@ -150,16 +137,16 @@ of a blank reset slot.
 
 ## Files
 
-| File            | Purpose                                              |
-|-----------------|------------------------------------------------------|
-| `aiquotabar.py` | Entry point (imports `aiquotabar`)                   |
-| `aiquotabar/`   | Application package (see Architecture)               |
-| `install.sh`    | One-line curl installer (detects Python, LaunchAgent)|
+| File               | Purpose                                                       |
+|--------------------|---------------------------------------------------------------|
+| `aiquotabar.py`    | Entry point (imports `aiquotabar`)                            |
+| `aiquotabar/`      | Application package (see Architecture)                        |
+| `tests/`           | Updater regression tests (disposable git repos)               |
+| `install.sh`       | One-line installer: clones this fork, venv, LaunchAgent, widget |
 | `make_launcher.sh` | Creates /Applications/AIQuota.app — headless launcher that restarts the menu bar app + reloads the widget (Spotlight: "AIQuota") |
-| `requirements.txt` | `rumps`, `curl_cffi`, `browser-cookie3`           |
-| `setup.sh`      | Legacy manual installer (kept for reference)         |
-| `assets/`       | demo.gif and screenshots for README                  |
-| `AIQuotaBarWidget/` | Optional WidgetKit desktop widget (Xcode project)   |
+| `requirements.txt` | `rumps`, `curl_cffi`, `browser-cookie3`, `pyobjc-framework-Quartz` |
+| `assets/`          | Provider icons used by the menu bar and menu                  |
+| `AIQuotaBarWidget/`| Optional WidgetKit desktop widget (Xcode project)             |
 
 ### Local files
 
@@ -174,40 +161,12 @@ keeps running until logout instead of being duplicated.
 
 macOS 27 puts Chrome's cookie DB behind "App Data" privacy protection
 (`TCC denied kTCCServiceSystemPolicyAppDataDetailed for com.google.Chrome`).
-Without Full Disk Access for the venv's real Python binary, every browser
-cookie detection silently returns nothing, so expired sessions never self-heal.
+Without Full Disk Access for the venv's real Python binary (`readlink -f .venv/bin/python3`),
+every browser cookie detection silently returns nothing, so expired sessions never
+self-heal. A python started from a terminal is attributed to the terminal, so test
+cookie access through a one-off launchd job, not the shell.
 On the same system `curl_cffi` only imports after CoreFoundation is loaded
 (`ui.py` gets this via `rumps`); standalone scripts must `import CoreFoundation` first.
-
-## Growth / virality rules
-
-- **README is a landing page, not docs.** Hook → GIF → install command must be above the fold.
-  A visitor should understand value and install in under 10 seconds.
-- **The demo GIF is the #1 driver of stars.** `assets/demo.gif` must be short, polished, and show
-  the "aha moment": menu bar icon → click → full usage breakdown with colors.
-- **Zero-friction install is non-negotiable.**
-  `curl -fsSL .../install.sh | bash` must work end-to-end without manual steps.
-  If it breaks, fix it before anything else.
-- **Social proof converts.** Star count badge, download count, real testimonials — keep them visible.
-  Never fake stats. Only show real numbers.
-- **Every touchpoint should nudge stars.** Post-install terminal message, in-app menu item,
-  GitHub Pages landing page — all link back to the repo.
-- **Keep the README concise.** One install command, one GIF, short feature list.
-  Long docs belong in a wiki, not the README.
-- **GitHub topics to maintain** (set via repo Settings → About):
-  `claude`, `anthropic`, `macos`, `menu-bar`, `usage-monitor`, `menubar-app`, `claude-ai`,
-  `chatgpt`, `cursor`, `copilot`, `rate-limit`, `ai-tools`
-
-## High-impact features to build (star drivers)
-
-These features would make the app significantly more shareable:
-
-1. **Gemini support** — Google's API has usage limits too; huge user base
-2. **Linux system tray** — opens the app to 70% more developers (use pystray)
-3. **Usage history chart** — "see your AI usage over time" is a compelling screenshot
-4. **Share/export** — one-click screenshot of usage to clipboard (instant Twitter content)
-5. **Claude Code / CLI tracking** — devs using Claude Code want to see limits too
-6. **Notification Center widget** — already have WidgetKit, expose in NC for more visibility
 
 ## Dev workflow
 
@@ -218,12 +177,18 @@ python3 aiquotabar.py
 # Check logs
 tail -f ~/Library/Application\ Support/AIQuotaBar/aiquotabar.log
 
+# Tests (never against the real $HOME — see "Do not")
+HOME=$(mktemp -d) .venv/bin/python -m unittest discover -s tests
+
 # Quick syntax check
-python3 -m py_compile aiquotabar.py
+python3 -m py_compile aiquotabar.py aiquotabar/*.py
 
 # Kill and restart
 launchctl kickstart -k gui/$(id -u)/com.aiquotabar   # LaunchAgent install
 pkill -f aiquotabar.py; sleep 1; python3 aiquotabar.py &   # manual run
+
+# Rebuild + reinstall the widget
+AIQuotaBarWidget/build_widget.sh
 ```
 
 ## Do not
@@ -235,15 +200,14 @@ pkill -f aiquotabar.py; sleep 1; python3 aiquotabar.py &   # manual run
 - Do not leave xcodebuild output registered with LaunchServices — the build step
   auto-runs `lsregister -trusted` on the build-dir app, creating a duplicate widget
   registration that fights the /Applications copy (pluginUUID flapping in chronod).
-  `build_widget.sh` now does the `lsregister -u` + delete at the end — don't drop it.
-
+  `build_widget.sh` does the `lsregister -u` + delete at the end — don't drop it.
+- Do not restart the app with `os.execv` or anything else that keeps the PID (see
+  "Restarts always get a new PID").
 - Do not add a `session_key` field — the app uses full cookie strings, not just the session key.
-- Do not multiply utilization values by 100 — all fields now return 0–100 percentages directly.
+- Do not multiply utilization values by 100 — all fields return 0–100 percentages directly.
 - Do not call `rumps.notification()` directly — always use `_notify()`.
 - Do not store cookies in plaintext anywhere other than `config.json` in the app data dir (outside the repo).
 - Do not import `aiquotabar.config` in a script or test with the real `$HOME` unless you mean to:
   the import runs the legacy-file migration, and `set_provider_disabled` saves through
   `config.save_config` (patching `ui.save_config` does not stop it). Point `HOME` at a temp dir.
 - Do not add Electron, a web server, or any always-on background process beyond the menu bar app itself.
-- Do not make the README longer than it already is — trim if anything.
-- Do not add features that don't drive stars or retention. Every line of code should serve growth.

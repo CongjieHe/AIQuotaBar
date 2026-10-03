@@ -65,7 +65,7 @@ if [ -z "$BUILT_APP" ]; then
 fi
 
 INSTALL_PATH="/Applications/$APP_NAME"
-echo "  ↓  Installing to $INSTALL_PATH…"
+echo "  ↓  Installing to ${INSTALL_PATH}…"
 rm -rf "$INSTALL_PATH"
 cp -R "$BUILT_APP" "$INSTALL_PATH"
 

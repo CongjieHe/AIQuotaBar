@@ -119,24 +119,9 @@ elif command -v xcodebuild &>/dev/null && [ -d "$INSTALL_DIR/AIQuotaBarWidget/AI
         echo "  ⚠  Widget build failed (non-fatal)"
     fi
 else
-    echo "  ↓  Installing pre-built desktop widget…"
-    WIDGET_URL="https://github.com/yagcioglutoprak/AIQuotaBar/releases/latest/download/AIQuotaBarWidget.zip"
-    WIDGET_TMP="/tmp/AIQuotaBarWidget_$$.zip"
-    if curl -fsSL -o "$WIDGET_TMP" "$WIDGET_URL" 2>/dev/null; then
-        rm -rf "$WIDGET_APP"
-        ditto -x -k "$WIDGET_TMP" /Applications/
-        xattr -dr com.apple.quarantine "$WIDGET_APP" 2>/dev/null || true
-        rm -f "$WIDGET_TMP"
-        # Launch once to register widget with the system
-        open "$WIDGET_APP"
-        sleep 2
-        osascript -e 'quit app "AIQuotaBarHost"' 2>/dev/null || true
-        echo "  ✓  Desktop widget installed"
-        WIDGET_INSTALLED=true
-    else
-        echo "  ⊘  Widget: download failed (non-fatal, skipping)"
-        rm -f "$WIDGET_TMP"
-    fi
+    # The widget is built from this repo's Swift sources; upstream's
+    # pre-built release does not match them.
+    echo "  ⊘  Widget: Xcode not found (optional, skipping)"
 fi
 
 if [ "$WIDGET_INSTALLED" = true ]; then
@@ -159,8 +144,7 @@ echo ""
 echo "  Look for the ◆ icon in your menu bar."
 echo "  It will auto-detect your Claude session from your browser."
 echo ""
-echo "  ─────────────────────────────────────────────────"
-echo "  ⭐ If you find this useful, star the repo!"
-echo "     https://github.com/yagcioglutoprak/AIQuotaBar"
-echo "  ─────────────────────────────────────────────────"
+echo "  macOS 27+: Chrome cookies are privacy-protected. Give Full Disk Access to"
+echo "     $(readlink -f "$PYTHON")"
+echo "  (System Settings → Privacy & Security) or sessions can't be detected."
 echo ""
