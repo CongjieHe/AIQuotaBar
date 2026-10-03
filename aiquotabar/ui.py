@@ -9,7 +9,6 @@ import sys
 import tempfile
 import time
 import threading
-import urllib.parse
 from datetime import datetime, timezone, timedelta
 
 from aiquotabar.config import (
@@ -17,25 +16,24 @@ from aiquotabar.config import (
     provider_disabled, set_provider_disabled,
     REFRESH_INTERVALS, DEFAULT_REFRESH,
     WARN_THRESHOLD, CRIT_THRESHOLD, PACING_ALERT_MINUTES,
-    UPDATE_CHECK_INTERVAL, HISTORY_COLORS,
-    WIDGET_CACHE_DIR, LOG_FILE,
+    UPDATE_CHECK_INTERVAL, LOG_FILE,
     LAUNCH_AGENT_LABEL, LAUNCH_AGENT_PLIST,
     LEGACY_LAUNCH_AGENT_LABEL, LEGACY_LAUNCH_AGENT_PLIST,
 )
 from aiquotabar.providers import (
     LimitRow, UsageData, ProviderData, parse_usage, fetch_raw,
     fetch_claude_code_stats, PROVIDER_REGISTRY, COOKIE_PROVIDERS,
-    CurlHTTPError, parse_cookie_string, is_auth_error,
+    CurlHTTPError, is_auth_error,
     _auto_detect_cookies, _auto_detect_chatgpt_cookies,
-    _auto_detect_copilot_cookies, _auto_detect_cursor_cookies,
-    _warn_keychain_once, _fmt_reset, _BROWSER_COOKIE3_OK,
+    _auto_detect_cursor_cookies,
+    _BROWSER_COOKIE3_OK,
 )
 from aiquotabar.history import (
     _load_history, _save_history, _append_history,
-    _calc_burn_rate, _calc_eta_minutes, _fmt_eta, _sparkline,
+    _calc_eta_minutes, _fmt_eta, _sparkline,
     _init_history_db, _record_sample, _rollup_daily_stats,
     _get_week_limit_hits, _get_today_stats,
-    _fetch_history_data, _nscolor,
+    _fetch_history_data,
 )
 from aiquotabar.widget import _write_widget_cache, _is_widget_installed
 from aiquotabar.update import _check_and_apply_update, _restart_app
@@ -143,204 +141,6 @@ try:
     _HAS_TOGGLE_VIEW = True
 except Exception:
     pass
-
-
-# -- Welcome window ------------------------------------------------------------
-
-def _show_welcome_window(gif_path: str, widget_installed: bool) -> None:
-    """Show a native macOS welcome window with side-by-side GIFs."""
-    from AppKit import (
-        NSWindow, NSImageView, NSImage, NSTextField, NSButton, NSFont,
-        NSMakeRect, NSWindowStyleMaskTitled, NSWindowStyleMaskClosable,
-        NSWindowStyleMaskFullSizeContentView,
-        NSBackingStoreBuffered, NSTextAlignmentCenter,
-        NSColor, NSBezelStyleRounded,
-        NSApplication, NSFloatingWindowLevel, NSScreen,
-        NSVisualEffectView, NSView,
-    )
-    import Quartz
-
-    PAD = 24
-    GAP = 16
-
-    # Load both GIFs
-    assets_dir = _ICON_DIR
-    demo_img = NSImage.alloc().initWithContentsOfFile_(
-        os.path.join(assets_dir, "demo.gif")
-    )
-    widget_img = NSImage.alloc().initWithContentsOfFile_(gif_path)
-
-    # Both GIFs at same height; widths from aspect ratios
-    GIF_H = 480
-    def _w_for_h(img, h):
-        if not img:
-            return 200
-        iw, ih = img.size().width, img.size().height
-        return int(h * iw / ih) if ih > 0 else 200
-
-    # Left GIF: fixed wider width, fill-scaled (crops top/bottom)
-    demo_w = 320
-    widget_w = _w_for_h(widget_img, GIF_H)
-    WIN_W = PAD + demo_w + GAP + widget_w + PAD
-    WIN_H = 70 + GIF_H + 20 + 150 + 54  # header + gifs + labels + info + button
-
-    # Centre on screen
-    screen = NSScreen.mainScreen().frame()
-    sx = (screen.size.width - WIN_W) / 2
-    sy = (screen.size.height - WIN_H) / 2
-
-    win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-        NSMakeRect(sx, sy, WIN_W, WIN_H),
-        (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
-         | NSWindowStyleMaskFullSizeContentView),
-        NSBackingStoreBuffered,
-        False,
-    )
-    win.setTitle_("")
-    win.setTitlebarAppearsTransparent_(True)
-    win.setTitleVisibility_(1)
-    win.setLevel_(NSFloatingWindowLevel)
-    win.setMovableByWindowBackground_(True)
-
-    content = win.contentView()
-    content.setWantsLayer_(True)
-
-    # -- Vibrancy background --
-    blur = NSVisualEffectView.alloc().initWithFrame_(content.bounds())
-    blur.setAutoresizingMask_(18)
-    blur.setBlendingMode_(0)
-    blur.setMaterial_(3)
-    blur.setState_(1)
-    content.addSubview_(blur)
-
-    border_color = Quartz.CGColorCreateGenericRGB(1, 1, 1, 0.08)
-
-    def _make_gif(img, x, y, w, h, fill=False):
-        c = NSView.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
-        c.setWantsLayer_(True)
-        c.layer().setCornerRadius_(10)
-        c.layer().setMasksToBounds_(True)
-        c.layer().setBorderWidth_(0.5)
-        c.layer().setBorderColor_(border_color)
-        content.addSubview_(c)
-        if img:
-            if fill:
-                # Scale to fill: size image view to cover container, clip overflow
-                iw, ih = img.size().width, img.size().height
-                ratio = iw / ih if ih > 0 else 1.0
-                # Scale by width -> compute height needed
-                iv_w = w
-                iv_h = int(w / ratio)
-                iv_y = h - iv_h  # align to top
-                iv = NSImageView.alloc().initWithFrame_(
-                    NSMakeRect(0, iv_y, iv_w, iv_h))
-            else:
-                iv = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
-            iv.setImage_(img)
-            iv.setAnimates_(True)
-            iv.setImageScaling_(3)
-            iv.setImageAlignment_(0)
-            iv.setWantsLayer_(True)
-            iv.layer().setMagnificationFilter_(Quartz.kCAFilterTrilinear)
-            iv.layer().setMinificationFilter_(Quartz.kCAFilterTrilinear)
-            iv.layer().setShouldRasterize_(True)
-            iv.layer().setRasterizationScale_(3.0)
-            c.addSubview_(iv)
-
-    def _label(text, x, y, w, align=NSTextAlignmentCenter, size=11, weight=0.3):
-        lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(x, y, w, 14))
-        lbl.setStringValue_(text)
-        lbl.setBezeled_(False)
-        lbl.setDrawsBackground_(False)
-        lbl.setEditable_(False)
-        lbl.setSelectable_(False)
-        lbl.setAlignment_(align)
-        lbl.setFont_(NSFont.systemFontOfSize_weight_(size, weight))
-        lbl.setTextColor_(NSColor.secondaryLabelColor())
-        content.addSubview_(lbl)
-
-    # -- Title + subtitle --
-    y_top = WIN_H - 52
-    t = NSTextField.alloc().initWithFrame_(
-        NSMakeRect(PAD, y_top, WIN_W - PAD * 2, 28)
-    )
-    t.setStringValue_("Welcome to AIQuotaBar")
-    t.setBezeled_(False)
-    t.setDrawsBackground_(False)
-    t.setEditable_(False)
-    t.setSelectable_(False)
-    t.setAlignment_(NSTextAlignmentCenter)
-    t.setFont_(NSFont.systemFontOfSize_weight_(20, 0.56))
-    content.addSubview_(t)
-
-    _label("Monitor your Claude and ChatGPT usage limits in real time.",
-           PAD, y_top - 22, WIN_W - PAD * 2, size=12)
-
-    # -- Side-by-side GIFs --
-    gif_y = y_top - 22 - 14 - GIF_H
-    _make_gif(demo_img, PAD, gif_y, demo_w, GIF_H, fill=True)
-    _label("Menu Bar", PAD, gif_y - 16, demo_w)
-
-    widget_x = PAD + demo_w + GAP
-    _make_gif(widget_img, widget_x, gif_y, widget_w, GIF_H)
-    _label("Desktop Widget", widget_x, gif_y - 16, widget_w)
-
-    # -- Info rows --
-    info_y = gif_y - 40
-    inner_w = WIN_W - PAD * 2
-    rows = [
-        ("Menu Bar",
-         "Click the diamond icon to see session limits, weekly caps, and reset times."),
-        ("Desktop Widget",
-         "Installed and synced. Right-click desktop > Edit Widgets > 'AI Quota'."
-         if widget_installed else
-         "Available to install. Check 'Desktop Widget' in the menu bar."),
-        ("Auto Refresh",
-         "Data updates every 60 seconds. Alerts at 80% and 95% usage."),
-    ]
-    for heading, desc in rows:
-        h = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(PAD, info_y, inner_w, 16)
-        )
-        h.setStringValue_(heading)
-        h.setBezeled_(False)
-        h.setDrawsBackground_(False)
-        h.setEditable_(False)
-        h.setSelectable_(False)
-        h.setAlignment_(NSTextAlignmentCenter)
-        h.setFont_(NSFont.systemFontOfSize_weight_(12, 0.4))
-        content.addSubview_(h)
-        info_y -= 16
-
-        d = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(PAD, info_y, inner_w, 14)
-        )
-        d.setStringValue_(desc)
-        d.setBezeled_(False)
-        d.setDrawsBackground_(False)
-        d.setEditable_(False)
-        d.setSelectable_(False)
-        d.setAlignment_(NSTextAlignmentCenter)
-        d.setFont_(NSFont.systemFontOfSize_(11))
-        d.setTextColor_(NSColor.secondaryLabelColor())
-        content.addSubview_(d)
-        info_y -= 22
-
-    # -- "Got it" button --
-    btn_w, btn_h = 120, 30
-    btn = NSButton.alloc().initWithFrame_(
-        NSMakeRect((WIN_W - btn_w) / 2, 14, btn_w, btn_h)
-    )
-    btn.setTitle_("Got it")
-    btn.setBezelStyle_(NSBezelStyleRounded)
-    btn.setKeyEquivalent_("\r")
-    btn.setAction_(b"performClose:")
-    btn.setTarget_(win)
-    content.addSubview_(btn)
-
-    win.makeKeyAndOrderFront_(None)
-    NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-    _show_welcome_window._active_win = win
 
 
 # -- History window helpers ----------------------------------------------------
@@ -688,7 +488,6 @@ def _show_history_window(conn) -> None:
     # Metric context: what the % means for each provider key
     _metric_hint = {
         "claude": "5-hour session window",
-        "copilot": "rate limit",
     }
 
     for prov in providers:
@@ -776,14 +575,6 @@ def _fmt_count(n: int) -> str:
 def _bar(pct: int, width: int = 14) -> str:
     filled = round(pct / 100 * width)
     return "\u2588" * filled + "\u2591" * (width - filled)
-
-
-def _status_icon(pct: int) -> str:
-    if pct >= CRIT_THRESHOLD:
-        return "\U0001f534"
-    if pct >= WARN_THRESHOLD:
-        return "\U0001f7e1"
-    return "\U0001f7e2"
 
 
 def _row_lines(row: LimitRow) -> list[str]:
@@ -1031,7 +822,6 @@ def _show_text(title: str, text: str):
 _BRAND_COLORS = {
     "Claude": "#D97757",
     "ChatGPT": "#74AA9C",
-    "Copilot": "#6E40C9",
     "Cursor": "#00A0D1",
 }
 
@@ -1118,194 +908,11 @@ def _ensure_panel_classes():
                 except Exception:
                     log.debug("_ClickHandler.gearClicked_ error", exc_info=True)
 
-            def shareClicked_(self, sender):
-                try:
-                    cb = getattr(type(self), '_share_fn', None)
-                    if callable(cb):
-                        cb(sender)
-                except Exception:
-                    pass
-
-            def copyImage_(self, sender):
-                try:
-                    cb = getattr(type(self), '_copy_image_fn', None)
-                    if callable(cb):
-                        cb()
-                except Exception:
-                    log.debug("_ClickHandler.copyImage_ error", exc_info=True)
-
-            def shareOnX_(self, sender):
-                try:
-                    cb = getattr(type(self), '_share_on_x_fn', None)
-                    if callable(cb):
-                        cb()
-                except Exception:
-                    log.debug("_ClickHandler.shareOnX_ error", exc_info=True)
-
         _DismissablePanelClass = _DismissablePanel
         _ClickHandlerClass = _ClickHandler
         _panel_classes_ready = True
     except Exception:
         log.debug("_ensure_panel_classes failed", exc_info=True)
-
-
-class _SharePopover:
-    """Two-option share menu: Copy Image or Share on X."""
-
-    def __init__(self, app: "ClaudeBar"):
-        self.app = app
-
-    def show(self, sender):
-        """Show a context menu with share options near the share button."""
-        try:
-            from AppKit import NSMenu, NSMenuItem, NSFont, NSApplication
-
-            menu = NSMenu.alloc().init()
-            menu.setAutoenablesItems_(False)
-
-            # -- Copy Image --
-            item1 = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                "  Copy Image", b"copyImage:", ""
-            )
-            item1.setEnabled_(True)
-            handler = self.app._panel._handler
-            if handler:
-                item1.setTarget_(handler)
-            menu.addItem_(item1)
-
-            # -- Share on X --
-            item2 = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                "  Share on X", b"shareOnX:", ""
-            )
-            item2.setEnabled_(True)
-            if handler:
-                item2.setTarget_(handler)
-            menu.addItem_(item2)
-
-            # Pop up at mouse location
-            evt = NSApplication.sharedApplication().currentEvent()
-            panel_obj = self.app._panel._panel
-            if evt and panel_obj:
-                NSMenu.popUpContextMenu_withEvent_forView_(
-                    menu, evt, panel_obj.contentView()
-                )
-            else:
-                # Fallback: pop up at status item button
-                btn = self.app._nsapp.nsstatusitem.button()
-                if btn:
-                    menu.popUpMenuPositioningItem_atLocation_inView_(
-                        None, (0, 0), btn
-                    )
-        except Exception:
-            log.debug("_SharePopover.show failed", exc_info=True)
-
-    def copy_image(self):
-        """Render the panel as PNG with watermark and copy to clipboard."""
-        try:
-            from AppKit import (
-                NSBitmapImageRep, NSPasteboard, NSImage,
-                NSGraphicsContext, NSColor, NSFont, NSBezierPath,
-            )
-            from Foundation import (
-                NSMakeRect, NSMakeSize, NSAttributedString,
-                NSFontAttributeName, NSForegroundColorAttributeName,
-            )
-
-            panel = self.app._panel
-            if not panel or not panel._panel:
-                return
-
-            view = panel._panel.contentView()
-            bounds = view.bounds()
-
-            # Create bitmap from current view
-            view.lockFocus()
-            rep = NSBitmapImageRep.alloc().initWithFocusedViewRect_(bounds)
-            view.unlockFocus()
-
-            if not rep:
-                return
-
-            # Build composite image: panel content + watermark bar at bottom
-            w = int(bounds.size.width)
-            h = int(bounds.size.height)
-            watermark_h = 24
-            total_h = h + watermark_h
-
-            img = NSImage.alloc().initWithSize_(NSMakeSize(w, total_h))
-            img.lockFocus()
-
-            # Draw panel content (shifted up by watermark height)
-            rep.drawInRect_(NSMakeRect(0, watermark_h, w, h))
-
-            # Draw watermark bar at the bottom
-            NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                0.1, 0.1, 0.12, 1.0
-            ).set()
-            NSBezierPath.fillRect_(NSMakeRect(0, 0, w, watermark_h))
-
-            attrs = {
-                NSFontAttributeName: NSFont.systemFontOfSize_weight_(9, 0.3),
-                NSForegroundColorAttributeName: NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                    0.5, 0.5, 0.55, 1.0
-                ),
-            }
-            text = NSAttributedString.alloc().initWithString_attributes_(
-                "AIQuotaBar  \u00b7  github.com/yagcioglutoprak/AIQuotaBar", attrs
-            )
-            text.drawAtPoint_((8, 6))
-
-            # Capture the composite
-            final_rep = NSBitmapImageRep.alloc().initWithFocusedViewRect_(
-                NSMakeRect(0, 0, w, total_h)
-            )
-            img.unlockFocus()
-
-            if not final_rep:
-                return
-
-            # Copy PNG to clipboard  (4 = NSBitmapImageFileTypePNG)
-            png_data = final_rep.representationUsingType_properties_(4, {})
-            if not png_data:
-                return
-
-            pb = NSPasteboard.generalPasteboard()
-            pb.clearContents()
-            pb.setData_forType_(png_data, "public.png")
-
-            log.info("Panel screenshot copied to clipboard")
-            _notify("AIQuotaBar", "Copied!", "Panel screenshot copied to clipboard")
-        except Exception:
-            log.debug("_SharePopover.copy_image failed", exc_info=True)
-
-    def share_on_x(self):
-        """Open X/Twitter with pre-filled usage stats."""
-        try:
-            parts = []
-            data = self.app._last_data
-            if data and data.session:
-                parts.append(f"Claude {data.session.pct}%")
-            for pd in self.app._provider_data:
-                if pd.error:
-                    continue
-                if pd._rows:
-                    best = max(r.pct for r in pd._rows if r.pct is not None) if pd._rows else None
-                    if best is not None:
-                        parts.append(f"{pd.name} {best}%")
-                elif pd.pct is not None:
-                    parts.append(f"{pd.name} {pd.pct}%")
-
-            stats = " \u00b7 ".join(parts) if parts else "my AI usage"
-            text = f"{stats} \u2014 tracking with AIQuotaBar"
-            url = (
-                "https://x.com/intent/post?text="
-                + urllib.parse.quote(text)
-                + "&url="
-                + urllib.parse.quote("https://github.com/yagcioglutoprak/AIQuotaBar")
-            )
-            subprocess.Popen(["open", url])
-        except Exception:
-            log.debug("_SharePopover.share_on_x failed", exc_info=True)
 
 
 class _UsagePanel:
@@ -1404,7 +1011,7 @@ class _UsagePanel:
 
         from AppKit import (
             NSVisualEffectView, NSScrollView, NSView,
-            NSBackingStoreBuffered, NSApplication,
+            NSBackingStoreBuffered,
         )
         from Foundation import NSMakeRect
 
@@ -1600,27 +1207,6 @@ class _UsagePanel:
                     y += 14 + 2
             y += self.SECTION_GAP
 
-        # Copilot section
-        copilot_pd = next((pd for pd in provider_data if pd.name == "Copilot"), None)
-        if copilot_pd and not copilot_pd.error:
-            has_any_data = True
-            reset_str = ""
-            if copilot_pd.spent is not None and copilot_pd.limit:
-                summary_text = f"{int(copilot_pd.spent)} / {int(copilot_pd.limit)}"
-            else:
-                summary_text = ""
-            elements.append(('provider_header', y, 18, 'Copilot', '#6E40C9', summary_text))
-            y += 18 + 6
-            if copilot_pd.pct is not None:
-                fake_row = LimitRow("Premium Requests", copilot_pd.pct, "")
-                elements.append(('limit_row', y, 20, fake_row, '#6E40C9'))
-                y += 20 + self.ROW_GAP
-            eta = _calc_eta_minutes(history, "copilot")
-            if eta is not None:
-                elements.append(('eta_line', y, 14, eta))
-                y += 14 + 2
-            y += self.SECTION_GAP
-
         # Cursor section
         cursor_pd = next((pd for pd in provider_data if pd.name == "Cursor"), None)
         if cursor_pd and not cursor_pd.error:
@@ -1748,7 +1334,7 @@ class _UsagePanel:
 
     def _render_header(self, parent, x, y, w, h, NSTextField, NSFont,
                        NSColor, NSButton, NSMakeRect, NSTextAlignmentLeft):
-        """Render: 'AIQuotaBar' title + gear + share buttons."""
+        """Render: 'AIQuotaBar' title + gear button."""
         # Title
         title = NSTextField.alloc().initWithFrame_(NSMakeRect(x, y, w - 60, h))
         title.setStringValue_("AIQuotaBar")
@@ -1760,16 +1346,6 @@ class _UsagePanel:
         title.setFont_(NSFont.systemFontOfSize_weight_(15, 0.56))
         title.setTextColor_(NSColor.labelColor())
         parent.addSubview_(title)
-
-        # Share button
-        share_btn = NSButton.alloc().initWithFrame_(NSMakeRect(x + w - 52, y, 24, h))
-        share_btn.setTitle_("\u2197")
-        share_btn.setBordered_(False)
-        share_btn.setFont_(NSFont.systemFontOfSize_(14))
-        if self._handler:
-            share_btn.setTarget_(self._handler)
-            share_btn.setAction_(b"shareClicked:")
-        parent.addSubview_(share_btn)
 
         # Gear button
         gear_btn = NSButton.alloc().initWithFrame_(NSMakeRect(x + w - 26, y, 24, h))
@@ -1975,8 +1551,7 @@ class ClaudeBar(rumps.App):
 
         # Floating panel (premium UI that replaces NSMenu)
         self._panel = _UsagePanel(self)
-        self._share_popover = _SharePopover(self)
-        self._click_handler_inst = None   # set in _deferred_welcome
+        self._click_handler_inst = None   # set in _deferred_startup
 
         self._rebuild_menu(None)
         self._timer = rumps.Timer(self._on_timer, self._refresh_interval)
@@ -1986,8 +1561,8 @@ class ClaudeBar(rumps.App):
         self._ui_ticker.start()
 
         # Deferred startup info (runs after the run loop is active)
-        self._welcome_timer = rumps.Timer(self._deferred_welcome, 2)
-        self._welcome_timer.start()
+        self._startup_timer = rumps.Timer(self._deferred_startup, 2)
+        self._startup_timer.start()
 
         # Always try to fetch on startup -- browser JS works even without saved cookies
         atexit.register(self._shutdown)
@@ -2028,7 +1603,7 @@ class ClaudeBar(rumps.App):
                 spark = _sparkline(self._history, "claude")
                 if spark:
                     items.append(_mi(f"  {spark}"))
-                    items.append(_mi(f"  \U0001f4c8 24h usage trend"))
+                    items.append(_mi("  \U0001f4c8 24h usage trend"))
                 try:
                     hits = _get_week_limit_hits(self._history_db, "claude")
                 except Exception:
@@ -2072,7 +1647,7 @@ class ClaudeBar(rumps.App):
                     spark = _sparkline(self._history, hkey)
                     if spark:
                         items.append(_mi(f"  {spark}"))
-                        items.append(_mi(f"  \U0001f4c8 24h usage trend"))
+                        items.append(_mi("  \U0001f4c8 24h usage trend"))
                     try:
                         hits = _get_week_limit_hits(self._history_db, hkey)
                     except Exception:
@@ -2085,36 +1660,6 @@ class ClaudeBar(rumps.App):
                     if line:
                         items.append(_mi(line))
                 items.append(None)
-
-        # -- COPILOT section (if detected or explicitly chosen) ---------------
-        copilot_pd = next(
-            (pd for pd in self._provider_data if pd.name == "Copilot"), None
-        )
-        if copilot_pd is None and "Copilot" in chosen_bar:
-            items.append(_section_header_mi("  GitHub Copilot", "copilot.png", "#6E40C9", icon_tint="#9B6BFF"))
-            items.append(_mi("  ⚠️  Not logged in — sign in at github.com"))
-            items.append(_mi("  in your browser, then Refresh"))
-            items.append(None)
-        if copilot_pd:
-            items.append(_section_header_mi("  GitHub Copilot", "copilot.png", "#6E40C9", icon_tint="#9B6BFF"))
-            for line in _provider_lines(copilot_pd):
-                if line:
-                    items.append(_mi(line))
-            # ETA + sparkline for Copilot
-            eta = _calc_eta_minutes(self._history, "copilot")
-            if eta is not None:
-                items.append(_mi(f"  \u23f1 Limit in ~{_fmt_eta(eta)}"))
-            spark = _sparkline(self._history, "copilot")
-            if spark:
-                items.append(_mi(f"  {spark}"))
-                items.append(_mi(f"  \U0001f4c8 24h usage trend"))
-            try:
-                hits = _get_week_limit_hits(self._history_db, "copilot")
-            except Exception:
-                hits = 0
-            if hits > 0:
-                items.append(_mi(f"  Hit limit {hits}x this week"))
-            items.append(None)
 
         # -- CURSOR section (if detected or explicitly chosen) ----------------
         cursor_pd = next(
@@ -2140,7 +1685,7 @@ class ClaudeBar(rumps.App):
                     spark = _sparkline(self._history, hkey)
                     if spark:
                         items.append(_mi(f"  {spark}"))
-                        items.append(_mi(f"  \U0001f4c8 24h usage trend"))
+                        items.append(_mi("  \U0001f4c8 24h usage trend"))
                     try:
                         hits = _get_week_limit_hits(self._history_db, hkey)
                     except Exception:
@@ -2176,7 +1721,7 @@ class ClaudeBar(rumps.App):
 
         # -- Other API providers ----------------------------------------------
         for pd in self._provider_data:
-            if pd.name in ("ChatGPT", "Copilot", "Cursor"):
+            if pd.name in ("ChatGPT", "Cursor"):
                 continue
             items.append(_mi(f"  {pd.name}"))
             items.append(None)
@@ -2209,8 +1754,6 @@ class ClaudeBar(rumps.App):
         # -- Actions ----------------------------------------------------------
         items.append(rumps.MenuItem("Refresh Now", callback=self._do_refresh))
         items.append(rumps.MenuItem("Open claude.ai/settings/usage", callback=self._open_usage_page))
-        items.append(rumps.MenuItem("Share on X / Twitter\u2026", callback=self._share_on_x))
-        items.append(rumps.MenuItem("\u2b50 Star on GitHub", callback=self._open_github))
         items.append(None)
 
         # Status bar display submenu
@@ -2240,7 +1783,7 @@ class ClaudeBar(rumps.App):
         items.append(bar_menu)
 
         # Provider visibility submenu -- unchecked providers are never fetched,
-        # auto-detected, or shown anywhere (menu, bar, share card, widget).
+        # auto-detected, or shown anywhere (menu, bar, panel, widget).
         show_menu = rumps.MenuItem("Show Providers")
         for cfg_key, (name, _) in PROVIDER_REGISTRY.items():
             item = rumps.MenuItem(
@@ -2269,7 +1812,6 @@ class ClaudeBar(rumps.App):
             ("chatgpt_warning", "ChatGPT \u2014 usage warnings (80% / 95%)"),
             ("chatgpt_reset",   "ChatGPT \u2014 reset alerts"),
             ("chatgpt_pacing",  "ChatGPT \u2014 pacing alert (ETA < 30 min)"),
-            ("copilot_pacing",  "Copilot \u2014 pacing alert (ETA < 30 min)"),
             ("cursor_warning",  "Cursor \u2014 usage warnings (80% / 95%)"),
             ("cursor_pacing",   "Cursor \u2014 pacing alert (ETA < 30 min)"),
         ]
@@ -2357,7 +1899,7 @@ class ClaudeBar(rumps.App):
 
     # -- widget ---------------------------------------------------------------
 
-    def _deferred_welcome(self, _timer):
+    def _deferred_startup(self, _timer):
         """Runs once after the run loop is active, then stops itself."""
         _timer.stop()
         self._hook_status_button()
@@ -2395,9 +1937,6 @@ class ClaudeBar(rumps.App):
             handler = _ClickHandlerClass.alloc().init()
             type(handler)._toggle_fn = lambda: self._panel.toggle()
             type(handler)._refresh_fn = lambda: self._do_refresh(None)
-            type(handler)._share_fn = lambda sender=None: self._share_popover.show(sender)
-            type(handler)._copy_image_fn = lambda: self._share_popover.copy_image()
-            type(handler)._share_on_x_fn = lambda: self._share_popover.share_on_x()
             type(handler)._show_menu_fn = lambda: self._show_fallback_menu()
             type(handler)._gear_menu_fn = lambda: self._get_settings_menu()
             self._click_handler_inst = handler
@@ -2442,40 +1981,21 @@ class ClaudeBar(rumps.App):
 
     def _check_widget_status(self):
         """Show startup info about what the app is doing."""
-        seen_welcome = self.config.get("seen_welcome", False)
-        widget_ok = _is_widget_installed()
-
-        if not seen_welcome:
-            # First launch -- show native welcome window with GIF
-            gif_path = os.path.join(_ICON_DIR, "widget_info.gif")
-            if os.path.isfile(gif_path):
-                _show_welcome_window(gif_path, widget_ok)
-            else:
-                # Fallback to notification if GIF missing
-                _notify(
-                    "Welcome to AIQuotaBar",
-                    "Monitoring Claude + ChatGPT usage",
-                    "Click the diamond in your menu bar to get started.",
-                )
-            self.config["seen_welcome"] = True
-            save_config(self.config)
+        if _is_widget_installed():
+            _notify(
+                "AIQuotaBar",
+                "Running",
+                "Menu bar and desktop widget are synced.",
+            )
         else:
-            # Subsequent launches -- brief notification
-            if widget_ok:
-                _notify(
-                    "AIQuotaBar",
-                    "Running",
-                    "Menu bar and desktop widget are synced.",
-                )
-            else:
-                _notify(
-                    "AIQuotaBar",
-                    "Running",
-                    (
-                        "Tracking usage from your menu bar. "
-                        "A desktop widget is also available, check the menu."
-                    ),
-                )
+            _notify(
+                "AIQuotaBar",
+                "Running",
+                (
+                    "Tracking usage from your menu bar. "
+                    "A desktop widget is also available, check the menu."
+                ),
+            )
 
     def _open_widget_settings(self, _sender):
         """Open the widget host app (shows add-widget instructions)."""
@@ -2606,11 +2126,6 @@ class ClaudeBar(rumps.App):
                         for row in rows:
                             hkey = f"{prefix}_{row.label.lower().replace(' ', '_')}"
                             _append_history(self._history, hkey, row.pct)
-            copilot_pd = next(
-                (pd for pd in self._provider_data if pd.name == "Copilot"), None
-            )
-            if copilot_pd and not copilot_pd.error and copilot_pd.pct is not None:
-                _append_history(self._history, "copilot", copilot_pd.pct)
             _save_history(self._history)
 
             # -- record to SQLite history --
@@ -2626,8 +2141,6 @@ class ClaudeBar(rumps.App):
                                 for row in rows:
                                     hkey = f"{prefix}_{row.label.lower().replace(' ', '_')}"
                                     _record_sample(self._history_db, hkey, row.pct)
-                    if copilot_pd and not copilot_pd.error and copilot_pd.pct is not None:
-                        _record_sample(self._history_db, "copilot", copilot_pd.pct)
                     self._history_db.commit()
                     # Periodic rollup (every hour)
                     if time.time() - self._last_rollup > 3600:
@@ -2763,7 +2276,6 @@ class ClaudeBar(rumps.App):
         # Static entries (single history key per provider)
         checks: list[tuple[str, str, str]] = [
             ("claude",  "claude_pacing",  "Claude session"),
-            ("copilot", "copilot_pacing", "Copilot"),
         ]
         # Dynamic per-row entries for multi-limit providers
         for prefix, pname, nkey in [
@@ -2797,7 +2309,6 @@ class ClaudeBar(rumps.App):
         "Claude":  {"icon": "claude_icon.png",        "tint": None,      "color": "#D97757", "sym": "\u25cf"},
         "ChatGPT": {"icon": "chatgpt_icon_clean.png", "tint": "#74AA9C", "color": "#74AA9C", "sym": "\u25c7"},
         "Cursor":  {"icon": "cursor.png",             "tint": "#6699FF", "color": "#6699FF", "sym": "\u25c8"},
-        "Copilot": {"icon": "copilot.png",            "tint": "#8CBFF3", "color": "#8CBFF3", "sym": "\u25c6"},
     }
 
     def _set_bar_title(self, provider_segments: list[tuple[str, int | None, str]],
@@ -2893,7 +2404,7 @@ class ClaudeBar(rumps.App):
         return None
 
     # Priority order for the 2 bar slots (highest first)
-    _BAR_PRIORITY = ["Claude", "ChatGPT", "Cursor", "Copilot"]
+    _BAR_PRIORITY = ["Claude", "ChatGPT", "Cursor"]
 
     def _apply(self, data: UsageData):
         # Collect all available segments. Claude is one segment among the
@@ -2947,7 +2458,6 @@ class ClaudeBar(rumps.App):
     # for silently re-detecting after a session expires.
     _COOKIE_DETECTORS = {
         "chatgpt_cookies": _auto_detect_chatgpt_cookies,
-        "copilot_cookies": _auto_detect_copilot_cookies,
         "cursor_cookies":  _auto_detect_cursor_cookies,
     }
     # Don't hammer the browser/Keychain when the user is logged out everywhere.
@@ -3061,39 +2571,11 @@ class ClaudeBar(rumps.App):
         except Exception:
             log.exception("Failed to open history window")
 
-    def _open_github(self, _sender):
-        subprocess.Popen(["open", "https://github.com/yagcioglutoprak/AIQuotaBar"])
-
-    def _share_on_x(self, _sender):
-        data = self._last_data
-        if data and data.session:
-            pct = int(data.session.pct)
-            icon = _status_icon(pct)
-            text = (
-                f"I'm at {pct}% of my Claude session limit {icon}\n"
-                f"Tracking Claude + ChatGPT + Cursor usage live in my macOS menu bar "
-                f"\u2014 zero setup, auto-detects from browser\n"
-                f"github.com/yagcioglutoprak/AIQuotaBar"
-            )
-        else:
-            text = (
-                "Track Claude + ChatGPT + Cursor usage live in your macOS menu bar "
-                "\u2014 zero setup, auto-detects from browser\n"
-                "github.com/yagcioglutoprak/AIQuotaBar"
-            )
-        url = "https://x.com/intent/post?text=" + urllib.parse.quote(text)
-        subprocess.Popen(["open", url])
-
     def _make_provider_key_cb(self, cfg_key: str, name: str):
         def _cb(_sender):
             if cfg_key in COOKIE_PROVIDERS:
                 # Cookie-based: re-run auto-detect
-                _detectors = {
-                    "chatgpt_cookies": _auto_detect_chatgpt_cookies,
-                    "copilot_cookies": _auto_detect_copilot_cookies,
-                    "cursor_cookies":  _auto_detect_cursor_cookies,
-                }
-                detect_fn = _detectors.get(cfg_key)
+                detect_fn = self._COOKIE_DETECTORS.get(cfg_key)
                 if detect_fn:
                     ck = detect_fn()
                     if ck:
@@ -3169,7 +2651,6 @@ class ClaudeBar(rumps.App):
         "Claude":  ("claude_icon.png",        None),
         "ChatGPT": ("chatgpt_icon_clean.png", "#74AA9C"),
         "Cursor":  ("cursor.png",             "#6699FF"),
-        "Copilot": ("copilot.png",            "#8CBFF3"),
     }
 
     def _make_sticky_toggle(self, display_name: str, is_on: bool, name: str):
@@ -3345,19 +2826,6 @@ class ClaudeBar(rumps.App):
             self._login_item_cached = True
             sender._menuitem.setState_(1)
             _notify("Claude Usage Bar", "Added to Login Items", "Will launch automatically on login")
-
-    def _try_auto_detect(self):
-        """Background: silently try to grab cookies from the browser on first run."""
-        cookie_str = _auto_detect_cookies()
-        if cookie_str:
-            self.config["cookie_str"] = cookie_str
-            save_config(self.config)
-            _notify(
-                "Claude Usage Bar",
-                "Cookies auto-detected from your browser \u2713",
-                "Fetching usage data\u2026",
-            )
-            self._schedule_fetch()
 
     def _auto_detect_menu(self, _sender):
         """Menu item: manually trigger auto-detect (runs in background thread)."""

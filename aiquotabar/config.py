@@ -87,7 +87,6 @@ NOTIF_DEFAULTS = {
     "chatgpt_warning":True,   # notify when ChatGPT usage crosses WARN/CRIT
     "claude_pacing":  True,   # predictive alert when Claude ETA < 30 min
     "chatgpt_pacing": True,   # predictive alert when ChatGPT ETA < 30 min
-    "copilot_pacing": True,   # predictive alert when Copilot ETA < 30 min
     "cursor_warning": True,   # notify when Cursor usage crosses WARN/CRIT
     "cursor_pacing":  True,   # predictive alert when Cursor ETA < 30 min
 }
@@ -108,8 +107,7 @@ RESET_DROP_PCT = 30          # pct drop that signals a reset
 UPDATE_CHECK_INTERVAL = 4 * 3600   # check for updates every 4 hours
 
 HISTORY_COLORS = {
-    "claude": "#D97757", "chatgpt": "#74AA9C",
-    "copilot": "#6E40C9", "cursor": "#00A0D1",
+    "claude": "#D97757", "chatgpt": "#74AA9C", "cursor": "#00A0D1",
 }
 
 

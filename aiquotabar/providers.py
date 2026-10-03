@@ -1,19 +1,17 @@
 """Data models and API fetch functions for all providers."""
 
 import json
-import math
 import os
 import subprocess
 import sys
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 
 from curl_cffi import requests
-from curl_cffi.requests.exceptions import HTTPError as CurlHTTPError
+from curl_cffi.requests.exceptions import HTTPError as CurlHTTPError  # noqa: F401 (re-exported to ui)
 
 try:
-    import browser_cookie3
+    import browser_cookie3  # noqa: F401 (availability check; the detect subprocess imports it)
     _BROWSER_COOKIE3_OK = True
 except ImportError:
     _BROWSER_COOKIE3_OK = False
@@ -430,34 +428,6 @@ def fetch_glm(api_key: str) -> ProviderData:
         return ProviderData("GLM (Zhipu)", error=str(e)[:80])
 
 
-def fetch_copilot(cookie_str: str) -> ProviderData:
-    """Fetch GitHub Copilot premium request usage via browser cookies."""
-    cookies = parse_cookie_string(cookie_str)
-    try:
-        r = requests.get(
-            "https://github.com/settings/billing/copilot_usage_card",
-            cookies=_strip_cf_cookies(cookies),
-            headers={
-                "Accept": "application/json",
-                "Referer": "https://github.com/settings/billing/premium_requests_usage",
-            },
-            timeout=10,
-            impersonate=_IMPERSONATE,
-        )
-        r.raise_for_status()
-        data = r.json()
-        log.debug("copilot_usage_card: %s", json.dumps(data, indent=2))
-        used = float(data.get("discountQuantity", 0))
-        limit = float(data.get("userPremiumRequestEntitlement", 0))
-        return ProviderData(
-            "Copilot", spent=used, limit=limit or None,
-            currency="", period="this month",
-        )
-    except Exception as e:
-        log.debug("fetch_copilot failed: %s", e)
-        return ProviderData("Copilot", error=str(e)[:80])
-
-
 def fetch_cursor(cookie_str: str) -> ProviderData:
     """Fetch Cursor IDE usage via browser cookies (WorkOS session)."""
     cookies = parse_cookie_string(cookie_str)
@@ -524,11 +494,10 @@ def fetch_cursor(cookie_str: str) -> ProviderData:
 
 
 # Registry: config_key -> (display_name, fetch_fn)
-# chatgpt_cookies / copilot_cookies are cookie-based (auto-detected);
+# chatgpt_cookies / cursor_cookies are cookie-based (auto-detected);
 # others are API key-based.
 PROVIDER_REGISTRY: dict[str, tuple[str, callable]] = {
     "chatgpt_cookies": ("ChatGPT",     fetch_chatgpt),
-    "copilot_cookies": ("Copilot",     fetch_copilot),
     "cursor_cookies":  ("Cursor",      fetch_cursor),
     "openai_key":      ("OpenAI",      fetch_openai),
     "minimax_key":     ("MiniMax",     fetch_minimax),
@@ -536,7 +505,7 @@ PROVIDER_REGISTRY: dict[str, tuple[str, callable]] = {
 }
 
 # Cookie-based providers (auto-detected from browser, not manually entered)
-COOKIE_PROVIDERS = {"chatgpt_cookies", "copilot_cookies", "cursor_cookies"}
+COOKIE_PROVIDERS = {"chatgpt_cookies", "cursor_cookies"}
 
 
 def is_auth_error(err: str | None) -> bool:
@@ -746,14 +715,6 @@ def _auto_detect_chatgpt_cookies() -> str | None:
     if not _BROWSER_COOKIE3_OK:
         return None
     cands = _run_cookie_detection("chatgpt.com", "__Secure-next-auth.session-token")
-    return cands[0] if cands else None
-
-
-def _auto_detect_copilot_cookies() -> str | None:
-    """Detect github.com session cookies from the browser (crash-safe subprocess)."""
-    if not _BROWSER_COOKIE3_OK:
-        return None
-    cands = _run_cookie_detection("github.com", "user_session")
     return cands[0] if cands else None
 
 

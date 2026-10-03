@@ -7,14 +7,13 @@ struct UsageSnapshot: Codable {
     let chatgpt: ChatGPTUsage
     let claudeCode: ClaudeCodeUsage
     let cursor: CursorUsage?
-    let copilot: CopilotUsage?
     let activeProviders: [String]?
     let barProviders: [String]?
 
     enum CodingKeys: String, CodingKey {
         case version
         case updatedAt = "updated_at"
-        case claude, chatgpt, cursor, copilot
+        case claude, chatgpt, cursor
         case claudeCode = "claude_code"
         case activeProviders = "active_providers"
         case barProviders = "bar_providers"
@@ -29,7 +28,7 @@ struct UsageSnapshot: Codable {
             if !parsed.isEmpty { return parsed }
         }
         // 2. Auto: top 2 active by priority
-        let priority: [AIProvider] = [.claude, .chatgpt, .cursor, .copilot]
+        let priority: [AIProvider] = [.claude, .chatgpt, .cursor]
         guard let ids = activeProviders, !ids.isEmpty else {
             return [.claude, .cursor]
         }
@@ -64,13 +63,6 @@ struct ChatGPTUsage: Codable {
 
 struct CursorUsage: Codable {
     let rows: [LimitRow]?
-    let error: String?
-}
-
-struct CopilotUsage: Codable {
-    let spent: Double?
-    let limit: Double?
-    let pct: Int?
     let error: String?
 }
 

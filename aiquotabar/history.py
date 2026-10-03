@@ -262,19 +262,6 @@ def _get_week_limit_hits(conn: sqlite3.Connection, key: str) -> int:
     return (row[0] if row else 0) + (today_row[0] if today_row else 0)
 
 
-def _weekly_sparkline(daily_stats: list[dict], width: int = 7) -> str:
-    """Render a 7-day sparkline from daily peak values."""
-    if len(daily_stats) < 2:
-        return ""
-    blocks = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
-    pts = [d["peak_pct"] for d in daily_stats[-width:]]
-    lo, hi = min(pts), max(pts)
-    if hi - lo < 2:
-        return ""
-    span = hi - lo
-    return "".join(blocks[min(7, int((p - lo) / span * 7))] for p in pts)
-
-
 def _get_today_stats(conn: sqlite3.Connection) -> dict[str, dict]:
     """Compute live stats from today's samples (not yet rolled up)."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -360,7 +347,7 @@ def _fetch_history_data(conn: sqlite3.Connection) -> dict | None:
         # Color: use parent provider color for sub-keys
         color = HISTORY_COLORS.get(key)
         if color is None:
-            for prefix in ("chatgpt", "cursor", "claude", "copilot"):
+            for prefix in ("chatgpt", "cursor", "claude"):
                 if key.startswith(prefix):
                     color = HISTORY_COLORS[prefix]
                     break
@@ -430,7 +417,6 @@ def cli_history():
     _colors = {
         "claude": "\033[38;5;209m",   # orange
         "chatgpt": "\033[38;5;114m",  # green
-        "copilot": "\033[38;5;141m",  # purple
         "cursor": "\033[38;5;45m",    # cyan
     }
     _reset = "\033[0m"

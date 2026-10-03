@@ -37,7 +37,6 @@ def _write_widget_cache(
                 active.append("claude")
             _key_map = {
                 "chatgpt_cookies": "chatgpt",
-                "copilot_cookies": "copilot",
                 "cursor_cookies":  "cursor",
             }
             for cfg_key, prov_id in _key_map.items():
@@ -52,20 +51,6 @@ def _write_widget_cache(
             if not chosen:
                 return None
             return [n.lower() for n in chosen]
-
-        def _copilot_block(provs: list[ProviderData]) -> dict:
-            pd = next((p for p in provs if p.name == "Copilot"), None)
-            if not pd:
-                return {"spent": None, "limit": None, "pct": None, "error": None}
-            if pd.error:
-                return {"spent": None, "limit": None, "pct": None, "error": pd.error}
-            pct = int(round(pd.spent / pd.limit * 100)) if pd.limit else 0
-            return {
-                "spent": pd.spent,
-                "limit": pd.limit,
-                "pct": pct,
-                "error": None,
-            }
 
         # ChatGPT rows
         chatgpt_pd = next((p for p in providers if p.name == "ChatGPT"), None)
@@ -107,7 +92,6 @@ def _write_widget_cache(
                 "rows": cursor_rows,
                 "error": cursor_error,
             },
-            "copilot": _copilot_block(providers),
             "claude_code": {
                 "today_messages": (cc_stats or {}).get("today_messages", 0),
                 "week_messages": (cc_stats or {}).get("week_messages", 0),
