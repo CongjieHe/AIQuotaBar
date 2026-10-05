@@ -26,6 +26,7 @@ class LimitRow:
     label: str
     pct: int          # 0–100
     reset_str: str    # e.g. "resets in 1h 23m" or "resets Thu 00:00"
+    resets_at: float | None = None   # epoch seconds, for the menu bar countdown
 
 
 @dataclass
@@ -105,6 +106,17 @@ def _org_id_from_cookies(cookies: dict) -> str | None:
     return cookies.get("lastActiveOrg") or cookies.get("routingHint")
 
 
+def _org_uuid(org) -> str | None:
+    """An organization's uuid, falling back to its id.
+
+    /organizations/{id}/usage rejects the legacy numeric id with HTTP 400
+    ("organization_uuid: invalid length"), so the uuid has to win.
+    """
+    if not isinstance(org, dict):
+        return None
+    return org.get("uuid") or org.get("id")
+
+
 def _org_id_from_api(cookies: dict) -> str | None:
     for path in (
         "/api/organizations",
@@ -115,14 +127,14 @@ def _org_id_from_api(cookies: dict) -> str | None:
         try:
             data = _get(f"https://claude.ai{path}", cookies)
             if isinstance(data, list) and data:
-                return data[0].get("id") or data[0].get("uuid")
+                return _org_uuid(data[0])
             if isinstance(data, dict):
                 for candidate in (
                     data.get("organization_id"),
                     data.get("org_id"),
-                    (data.get("organizations") or [{}])[0].get("id"),
-                    (data.get("account", {}).get("memberships") or [{}])[0]
-                        .get("organization", {}).get("id"),
+                    _org_uuid((data.get("organizations") or [{}])[0]),
+                    _org_uuid((data.get("account", {}).get("memberships") or [{}])[0]
+                              .get("organization")),
                 ):
                     if candidate:
                         return candidate
@@ -161,17 +173,30 @@ def fetch_raw(cookie_str: str) -> dict:
 _DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
+def _parse_reset(val) -> datetime:
+    """Epoch seconds or an ISO-8601 string (naive means UTC) -> aware datetime."""
+    if isinstance(val, (int, float)):
+        return datetime.fromtimestamp(val, tz=timezone.utc)
+    s = str(val).rstrip("Z")
+    if "+" not in s[10:] and s[-6] != "+":
+        s += "+00:00"
+    return datetime.fromisoformat(s)
+
+
+def _reset_ts(val) -> float | None:
+    if val is None:
+        return None
+    try:
+        return _parse_reset(val).timestamp()
+    except Exception:
+        return None
+
+
 def _fmt_reset(val) -> str:
     if val is None:
         return ""
     try:
-        if isinstance(val, (int, float)):
-            dt = datetime.fromtimestamp(val, tz=timezone.utc)
-        else:
-            s = str(val).rstrip("Z")
-            if "+" not in s[10:] and s[-6] != "+":
-                s += "+00:00"
-            dt = datetime.fromisoformat(s)
+        dt = _parse_reset(val)
         now = datetime.now(timezone.utc)
         delta = dt - now
         secs = delta.total_seconds()
@@ -200,7 +225,7 @@ def _row(data: dict, key: str, label: str) -> LimitRow | None:
     # API returns 0-100 percentage for all fields (five_hour, seven_day, etc.)
     pct = min(100, round(raw))
     reset = _fmt_reset(bucket.get("resets_at"))
-    return LimitRow(label, pct, reset)
+    return LimitRow(label, pct, reset, _reset_ts(bucket.get("resets_at")))
 
 
 def _scoped_rows(u: dict, existing: list) -> list[LimitRow]:
@@ -226,7 +251,8 @@ def _scoped_rows(u: dict, existing: list) -> list[LimitRow]:
             pct = min(100, round(float(lim.get("percent") or 0)))
         except (TypeError, ValueError):
             pct = 0
-        rows.append(LimitRow(label, pct, _fmt_reset(lim.get("resets_at"))))
+        rows.append(LimitRow(label, pct, _fmt_reset(lim.get("resets_at")),
+                             _reset_ts(lim.get("resets_at"))))
     return rows
 
 
@@ -306,7 +332,7 @@ def _parse_wham_window(window: dict | None, label_prefix: str = "") -> LimitRow 
     pct = min(100, int(window.get("used_percent", 0)))
     reset_str = _fmt_reset(window.get("reset_at")) if window.get("reset_at") else ""
     label = " ".join(p for p in [label_prefix, _window_duration_label(window)] if p) or "Usage"
-    return LimitRow(label, pct, reset_str)
+    return LimitRow(label, pct, reset_str, _reset_ts(window.get("reset_at")))
 
 
 # Model-specific side quotas we deliberately don't surface. Spark is a
@@ -449,10 +475,12 @@ def fetch_cursor(cookie_str: str) -> ProviderData:
         plan = individual.get("plan") or {}
         # Build reset string from billingCycleEnd
         reset_str = ""
+        reset_ts = None
         cycle_end = data.get("billingCycleEnd")
         if cycle_end:
             try:
                 end_dt = datetime.fromisoformat(cycle_end.replace("Z", "+00:00"))
+                reset_ts = end_dt.timestamp()
                 delta = end_dt - datetime.now(timezone.utc)
                 if delta.total_seconds() > 0:
                     days = delta.days
@@ -469,8 +497,8 @@ def fetch_cursor(cookie_str: str) -> ProviderData:
             api_pct = int(round(float(plan.get("apiPercentUsed", 0))))
             total_pct = int(round(float(plan.get("totalPercentUsed", 0))))
             rows = [
-                LimitRow(label="Auto", pct=auto_pct, reset_str=reset_str),
-                LimitRow(label="API", pct=api_pct, reset_str=reset_str),
+                LimitRow(label="Auto", pct=auto_pct, reset_str=reset_str, resets_at=reset_ts),
+                LimitRow(label="API", pct=api_pct, reset_str=reset_str, resets_at=reset_ts),
             ]
         else:
             # Enterprise/team plan: no "plan" block. Show only the member's own
@@ -484,7 +512,8 @@ def fetch_cursor(cookie_str: str) -> ProviderData:
             total_pct = min(100, int(round(used / float(limit) * 100)))
             # Whole dollars, no spaces — fits the widget's 3-column layout
             label = f"${used / 100:,.0f}/${float(limit) / 100:,.0f}"
-            rows = [LimitRow(label=label, pct=total_pct, reset_str=reset_str)]
+            rows = [LimitRow(label=label, pct=total_pct, reset_str=reset_str,
+                             resets_at=reset_ts)]
         pd = ProviderData("Cursor", spent=float(total_pct), limit=100.0, currency="")
         pd._rows = rows
         return pd

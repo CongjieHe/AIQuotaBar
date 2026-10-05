@@ -100,7 +100,12 @@ cat > "$PLIST" <<PLIST_EOF
 PLIST_EOF
 
 launchctl bootout gui/$(id -u) "$PLIST" 2>/dev/null || true
+# Copies started by hand would hold the single-instance lock and make the
+# LaunchAgent's copy exit right away.
+pkill -f "$INSTALL_DIR/claude_bar.py" 2>/dev/null || true
+pkill -f "$INSTALL_DIR/aiquotabar.py" 2>/dev/null || true
 sleep 1
+# RunAtLoad starts the app now, from the freshly installed code.
 launchctl bootstrap gui/$(id -u) "$PLIST"
 echo "  ✓  Added to Login Items (runs at every login)"
 
@@ -108,19 +113,20 @@ echo "  ✓  Added to Login Items (runs at every login)"
 WIDGET_APP="/Applications/AIQuotaBarHost.app"
 WIDGET_INSTALLED=false
 
-if [ -d "$WIDGET_APP" ]; then
-    echo "  ✓  Desktop widget already installed"
-    WIDGET_INSTALLED=true
-elif command -v xcodebuild &>/dev/null && [ -d "$INSTALL_DIR/AIQuotaBarWidget/AIQuotaBarWidget.xcodeproj" ]; then
+# Rebuild whenever Xcode is present, even over an existing install, so an
+# update reaches the widget too. The widget is built from this repo's Swift
+# sources; upstream's pre-built release does not match them.
+if command -v xcodebuild &>/dev/null && [ -d "$INSTALL_DIR/AIQuotaBarWidget/AIQuotaBarWidget.xcodeproj" ]; then
     echo "  ↓  Building desktop widget (Xcode found)…"
     if bash "$INSTALL_DIR/AIQuotaBarWidget/build_widget.sh"; then
         WIDGET_INSTALLED=true
     else
         echo "  ⚠  Widget build failed (non-fatal)"
     fi
+elif [ -d "$WIDGET_APP" ]; then
+    echo "  ⚠  Desktop widget installed, but Xcode not found to update it"
+    WIDGET_INSTALLED=true
 else
-    # The widget is built from this repo's Swift sources; upstream's
-    # pre-built release does not match them.
     echo "  ⊘  Widget: Xcode not found (optional, skipping)"
 fi
 
@@ -134,11 +140,9 @@ if bash "$INSTALL_DIR/make_launcher.sh" "$INSTALL_DIR" >/dev/null 2>&1; then
     echo "  ✓  Launcher: /Applications/AIQuota.app — Spotlight \"AIQuota\" relaunches everything"
 fi
 
-# ── 6. Launch now ─────────────────────────────────────────────────────────────
-pkill -f "$INSTALL_DIR/claude_bar.py" 2>/dev/null || true
-pkill -f "$INSTALL_DIR/aiquotabar.py" 2>/dev/null || true
-sleep 1
-"$PYTHON" "$INSTALL_DIR/aiquotabar.py" &>/dev/null &
+# ── 6. Running ────────────────────────────────────────────────────────────────
+# Already started by the LaunchAgent above. Launching a second copy here used
+# to race launchd's KeepAlive respawn into two menu bar icons.
 echo "  ✓  Launched!"
 echo ""
 echo "  Look for the ◆ icon in your menu bar."

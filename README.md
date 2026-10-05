@@ -29,9 +29,11 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 ## What it shows
 
-- **Menu bar:** brand icon + percentage per provider. Claude shows the 5-hour
-  session; a trailing `·` means a weekly cap is maxed. A `–` means the provider has
-  no data (not logged in, or the fetch failed).
+- **Menu bar:** brand icon + percentage per provider, orange from 80% and red from
+  95%. Claude shows the 5-hour session by default; a trailing `·` means a weekly cap
+  is maxed. A `–` means the provider has no data (not logged in, or the fetch failed).
+  Under **Status Bar** you can add more Claude limits (e.g. `5h 3%  7d·F 0%`) and
+  turn on a reset countdown for limits that reset within 24 hours.
 - **Panel / menu** (click / right-click the icon): Claude 5-hour, weekly and
   per-model weekly limits, Cursor plan usage, reset times, burn-rate ETA and
   24h sparklines, plus local Claude Code activity.

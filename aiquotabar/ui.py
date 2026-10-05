@@ -565,6 +565,26 @@ def _show_history_window(conn) -> None:
 
 # -- Display helpers -----------------------------------------------------------
 
+def _severity(pct: int | None) -> str | None:
+    """'crit' / 'warn' at the notification thresholds, else None."""
+    if pct is None:
+        return None
+    if pct >= CRIT_THRESHOLD:
+        return "crit"
+    if pct >= WARN_THRESHOLD:
+        return "warn"
+    return None
+
+
+def _fmt_countdown(secs: float) -> str:
+    """Compact time left for the menu bar: 47m, 4h 8m."""
+    h, rem = divmod(max(60, int(secs)), 3600)
+    m = rem // 60
+    if not h:
+        return f"{m}m"
+    return f"{h}h {m}m" if m else f"{h}h"
+
+
 def _fmt_count(n: int) -> str:
     """Format a message count compactly: 1234 -> '1.2k', 999 -> '999'."""
     if n >= 1000:
@@ -787,12 +807,27 @@ def _clipboard_text() -> str:
 # -- notification helpers ------------------------------------------------------
 
 def _notify(title: str, subtitle: str, message: str = ""):
-    """rumps.notification wrapper -- silently swallows if the notification
-    center is unavailable (e.g. missing Info.plist in dev environments)."""
+    """Post a macOS notification.
+
+    rumps.notification needs a bundle identifier, which a plain (venv/conda)
+    Python lacks -- it raises and every alert used to be silently dropped. Fall
+    back to AppleScript's `display notification`, which works from any process.
+    """
     try:
         rumps.notification(title, subtitle, message)
+        return
     except Exception as e:
-        log.debug("notification suppressed: %s", e)
+        log.debug("rumps notification unavailable (%s); using osascript", e)
+
+    def _esc(s: str) -> str:
+        return s.replace("\\", "\\\\").replace('"', '\\"')
+    script = (f'display notification "{_esc(message)}" '
+              f'with title "{_esc(title)}" subtitle "{_esc(subtitle)}"')
+    try:
+        subprocess.Popen(["osascript", "-e", script],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        log.debug("osascript notification failed", exc_info=True)
 
 
 def _show_text(title: str, text: str):
@@ -1524,6 +1559,9 @@ class ClaudeBar(rumps.App):
         self._cookie_redetect_at: dict[str, float] = {}  # cfg_key -> last re-detect ts
         self._fetching = False
         self._last_updated: datetime | None = None
+        # When _update_bar_title last drew the bar; None while a plain status
+        # title (error marker) is up, so the countdown tick leaves it alone.
+        self._last_title_at: float | None = None
 
         self._refresh_interval = self.config.get("refresh_interval", DEFAULT_REFRESH)
         self._cc_stats: dict | None = None   # Claude Code local stats
@@ -1780,6 +1818,25 @@ class ClaudeBar(rumps.App):
             callback=self._bar_reset_auto,
         )
         bar_menu.add(auto_item)
+
+        # Which Claude limits the Claude segment shows (one or more)
+        bar_menu.add(None)
+        header = rumps.MenuItem("Claude limits")
+        header._menuitem.setEnabled_(False)
+        bar_menu.add(header)
+        wanted = self.config.get("claude_bar_limits") or self.DEFAULT_CLAUDE_BAR_LIMITS
+        labels = [r.label for r in self._claude_rows(data)]
+        labels += [lbl for lbl in wanted if lbl not in labels]
+        for lbl in labels:
+            item = rumps.MenuItem(f"  {lbl}", callback=self._make_claude_limit_cb(lbl))
+            item._menuitem.setState_(1 if lbl in wanted else 0)
+            bar_menu.add(item)
+
+        bar_menu.add(None)
+        reset_item = rumps.MenuItem("Show Reset Countdown (< 24h)",
+                                    callback=self._toggle_bar_reset)
+        reset_item._menuitem.setState_(1 if self.config.get("bar_show_reset") else 0)
+        bar_menu.add(reset_item)
         items.append(bar_menu)
 
         # Provider visibility submenu -- unchecked providers are never fetched,
@@ -1896,6 +1953,12 @@ class ClaudeBar(rumps.App):
             self._apply(data)
         elif title is not None:
             self.title = title
+            self._last_title_at = None
+        elif (self._last_title_at is not None and self._last_data is not None
+              and self.config.get("bar_show_reset")
+              and time.time() - self._last_title_at >= 30):
+            # Fetches run every few minutes; keep the countdown current.
+            self._update_bar_title(self._last_data)
 
     # -- widget ---------------------------------------------------------------
 
@@ -1903,7 +1966,6 @@ class ClaudeBar(rumps.App):
         """Runs once after the run loop is active, then stops itself."""
         _timer.stop()
         self._hook_status_button()
-        self._check_widget_status()
 
     def _hook_status_button(self):
         """Replace NSMenu with panel toggle on the status item button click."""
@@ -1978,24 +2040,6 @@ class ClaudeBar(rumps.App):
         except Exception:
             log.debug("_get_settings_menu failed", exc_info=True)
             return None
-
-    def _check_widget_status(self):
-        """Show startup info about what the app is doing."""
-        if _is_widget_installed():
-            _notify(
-                "AIQuotaBar",
-                "Running",
-                "Menu bar and desktop widget are synced.",
-            )
-        else:
-            _notify(
-                "AIQuotaBar",
-                "Running",
-                (
-                    "Tracking usage from your menu bar. "
-                    "A desktop widget is also available, check the menu."
-                ),
-            )
 
     def _open_widget_settings(self, _sender):
         """Open the widget host app (shows add-widget instructions)."""
@@ -2311,16 +2355,26 @@ class ClaudeBar(rumps.App):
         "Cursor":  {"icon": "cursor.png",             "tint": "#6699FF", "color": "#6699FF", "sym": "\u25c8"},
     }
 
-    def _set_bar_title(self, provider_segments: list[tuple[str, int | None, str]],
-                       cc_msgs: int | None = None):
-        """Multi-indicator attributed title with brand logo icons.
+    def _set_bar_title(self, segments: list[dict], cc_msgs: int | None = None):
+        """Brand icon + percentage per segment (see _bar_segments).
 
-        provider_segments: list of (provider_name, pct, extra_suffix)
-          e.g. [("Claude", 36, " \u00b7"), ("ChatGPT", 12, "")]
-        pct=None renders an en-dash placeholder (provider chosen but no data).
+        Percentages turn orange/red at the warning thresholds so trouble shows
+        without opening anything. Several Claude limits share one icon and get
+        short tags (5h, 7d). With bar_show_reset on, a reset less than 24h away
+        follows its percentage as a countdown. pct=None renders an en-dash
+        placeholder (provider chosen but no data).
 
-        Falls back to colored text symbols if AppKit / icons unavailable.
+        Falls back to plain text if AppKit / icons are unavailable.
         """
+        show_reset = bool(self.config.get("bar_show_reset"))
+        now = time.time()
+
+        def countdown(seg: dict) -> str:
+            ts = seg.get("resets_at")
+            if not show_reset or ts is None or not 0 < ts - now < 86400:
+                return ""
+            return _fmt_countdown(ts - now)
+
         try:
             from AppKit import (NSColor, NSFont,
                                 NSForegroundColorAttributeName, NSFontAttributeName)
@@ -2334,34 +2388,48 @@ class ClaudeBar(rumps.App):
 
             font = NSFont.menuBarFontOfSize_(0)
             base = {NSFontAttributeName: font} if font else {}
+            # Tags and countdowns are secondary: smaller, but with no explicit
+            # colour, so they keep the menu bar's adaptive light/dark look.
+            small_font = (NSFont.menuBarFontOfSize_(max(10.0, font.pointSize() * 0.85))
+                          if font else None)
+            small = {NSFontAttributeName: small_font} if small_font else base
+            sev_colors = {"warn": NSColor.systemOrangeColor(),
+                          "crit": NSColor.systemRedColor()}
 
-            s = NSMutableAttributedString.alloc().initWithString_("",)
+            def text(st: str, attrs: dict | None = None, color=None):
+                a = dict(base if attrs is None else attrs)
+                if color is not None:
+                    a[NSForegroundColorAttributeName] = color
+                return NSAttributedString.alloc().initWithString_attributes_(st, a)
 
-            for i, (name, pct, suffix) in enumerate(provider_segments):
-                cfg = self._BAR_PROVIDERS.get(name, {})
-                color_hex = cfg.get("color", "#AAAAAA")
-                color = _rgb(color_hex)
-
-                if i > 0:
-                    s.appendAttributedString_(
-                        NSAttributedString.alloc().initWithString_attributes_("   ", base)
-                    )
-
-                icon_file = cfg.get("icon")
-                tint = cfg.get("tint")
-                img = _bar_icon(icon_file, tint_hex=tint) if icon_file else None
-                if img:
-                    s.appendAttributedString_(_icon_astr(img, base))
-                else:
-                    sym = cfg.get("sym", "\u25cf")
-                    seg = NSMutableAttributedString.alloc().initWithString_attributes_(f"{sym} ", base)
-                    seg.addAttribute_value_range_(NSForegroundColorAttributeName, color, (0, len(sym)))
-                    s.appendAttributedString_(seg)
-
-                pct_str = f"{pct}%" if pct is not None else "–"
+            s = NSMutableAttributedString.alloc().initWithString_("")
+            prev = None
+            for i, seg in enumerate(segments):
+                name = seg["name"]
+                same = name == prev     # e.g. Claude 5h + 7d share one icon
+                prev = name
+                if i:
+                    s.appendAttributedString_(text("  " if same else "   "))
+                if not same:
+                    cfg = self._BAR_PROVIDERS.get(name, {})
+                    icon_file = cfg.get("icon")
+                    img = _bar_icon(icon_file, tint_hex=cfg.get("tint")) if icon_file else None
+                    if img:
+                        s.appendAttributedString_(_icon_astr(img, base))
+                    else:
+                        s.appendAttributedString_(text(
+                            cfg.get("sym", "\u25cf"), color=_rgb(cfg.get("color", "#AAAAAA"))))
+                if seg.get("tag"):
+                    s.appendAttributedString_(text(("" if same else " ") + seg["tag"], small))
+                pct = seg["pct"]
+                pct_str = f"{pct}%" if pct is not None else "\u2013"
                 s.appendAttributedString_(
-                    NSAttributedString.alloc().initWithString_attributes_(f" {pct_str}{suffix}", base)
-                )
+                    text(f" {pct_str}", color=sev_colors.get(_severity(pct))))
+                if seg.get("suffix"):
+                    s.appendAttributedString_(text(seg["suffix"]))
+                left = countdown(seg)
+                if left:
+                    s.appendAttributedString_(text(f" {left}", small))
 
             # -- Claude Code  diamond 3.2k --
             if cc_msgs is not None and cc_msgs > 0:
@@ -2378,11 +2446,13 @@ class ClaudeBar(rumps.App):
             log.debug("_set_bar_title failed: %s", e)
         # Plain-text fallback
         parts = []
-        for name, pct, suffix in provider_segments:
-            cfg = self._BAR_PROVIDERS.get(name, {})
-            sym = cfg.get("sym", "\u25cf")
-            pct_str = f"{pct}%" if pct is not None else "\u2013"
-            parts.append(f"{sym} {pct_str}{suffix}")
+        for seg in segments:
+            cfg = self._BAR_PROVIDERS.get(seg["name"], {})
+            pct = seg["pct"]
+            bits = [cfg.get("sym", "\u25cf"), seg.get("tag"),
+                    (f"{pct}%" if pct is not None else "\u2013") + seg.get("suffix", ""),
+                    countdown(seg)]
+            parts.append(" ".join(b for b in bits if b))
         if cc_msgs is not None and cc_msgs > 0:
             parts.append(f"\u25c6 {_fmt_count(cc_msgs)}")
         self.title = "  ".join(parts)
@@ -2392,60 +2462,99 @@ class ClaudeBar(rumps.App):
         d = self._last_data
         return bool(d and (d.session or d.weekly_all or d.weekly_sonnet))
 
-    def _provider_bar_pct(self, pd: ProviderData) -> int | None:
-        """Extract a single percentage for the menu bar from a provider."""
+    @staticmethod
+    def _claude_rows(data: UsageData | None) -> list[LimitRow]:
+        """Every Claude limit, session first (labels: 5H, 7D, 7D Sonnet, 7D <model>)."""
+        if not data:
+            return []
+        return [r for r in (data.session, data.weekly_all, data.weekly_sonnet, *data.scoped)
+                if r]
+
+    # Claude limits shown in the menu bar when claude_bar_limits is unset. The
+    # session leads: it decides whether you can keep working right now.
+    DEFAULT_CLAUDE_BAR_LIMITS = ["5H"]
+
+    @staticmethod
+    def _limit_tag(label: str) -> str:
+        """Short menu bar tag for a Claude limit: 5H -> 5h, 7D Fable -> 7d·F."""
+        window, _, model = label.partition(" ")
+        return window.lower() + (f"\u00b7{model[0].upper()}" if model else "")
+
+    def _claude_bar_segments(self, data: UsageData) -> list[dict]:
+        """One segment per chosen Claude limit that has data (claude_bar_limits)."""
+        rows = self._claude_rows(data)
+        wanted = self.config.get("claude_bar_limits") or self.DEFAULT_CLAUDE_BAR_LIMITS
+        chosen = [r for r in rows if r.label in wanted]
+        if not chosen:
+            primary = data.session or data.weekly_all or data.weekly_sonnet
+            chosen = [primary] if primary else []
+        tagged = len(chosen) > 1
+        weekly_maxed = any(r.pct >= CRIT_THRESHOLD for r in rows if r is not data.session)
+        return [{
+            "name": "Claude", "pct": r.pct, "resets_at": r.resets_at,
+            "tag": self._limit_tag(r.label) if tagged else None,
+            # A lone session number gets a trailing "·" when a weekly limit is
+            # maxed; once a weekly limit has its own segment it speaks for itself.
+            "suffix": " \u00b7" if (weekly_maxed and not tagged and r is data.session
+                                    and r.pct < CRIT_THRESHOLD) else "",
+        } for r in chosen]
+
+    def _provider_bar_segment(self, pd: ProviderData) -> dict | None:
+        """A third-party provider's bar segment: its worst row."""
         if pd.error:
             return None
         rows = getattr(pd, "_rows", None)
         if rows:
-            return max(r.pct for r in rows)
-        if pd.pct is not None:
-            return pd.pct
-        return None
+            worst = max(rows, key=lambda r: r.pct)
+            pct, resets_at = worst.pct, worst.resets_at
+        elif pd.pct is not None:
+            pct, resets_at = pd.pct, None
+        else:
+            return None
+        return {"name": pd.name, "pct": pct, "resets_at": resets_at,
+                "tag": None, "suffix": ""}
+
+    def _provider_bar_pct(self, pd: ProviderData) -> int | None:
+        """Extract a single percentage for the menu bar from a provider."""
+        seg = self._provider_bar_segment(pd)
+        return seg["pct"] if seg else None
 
     # Priority order for the 2 bar slots (highest first)
     _BAR_PRIORITY = ["Claude", "ChatGPT", "Cursor"]
 
-    def _apply(self, data: UsageData):
-        # Collect all available segments. Claude is one segment among the
-        # others: a failed Claude fetch must not blank the whole bar.
-        available: dict[str, tuple[str, int, str]] = {}
-        primary = data.session or data.weekly_all or data.weekly_sonnet
-        if primary:
-            weekly_maxed = any(
-                r and r.pct >= CRIT_THRESHOLD
-                for r in [data.weekly_all, data.weekly_sonnet, *data.scoped]
-            )
-            extra = " \u00b7" if (weekly_maxed and primary is data.session
-                             and primary.pct < CRIT_THRESHOLD) else ""
-            available["Claude"] = ("Claude", primary.pct, extra)
+    def _bar_segments(self, data: UsageData) -> list[dict]:
+        """What the menu bar shows, in order: chosen providers, or auto top 2."""
+        available: dict[str, list[dict]] = {}
+        claude = self._claude_bar_segments(data)
+        if claude:
+            available["Claude"] = claude
         for pd in self._provider_data:
-            bar_pct = self._provider_bar_pct(pd)
-            if bar_pct is not None:
-                available[pd.name] = (pd.name, bar_pct, "")
+            seg = self._provider_bar_segment(pd)
+            if seg:
+                available[pd.name] = [seg]
 
-        # User-configured bar providers, or auto top 2 by priority
         chosen = self.config.get("bar_providers")
         if chosen:
             # Explicitly chosen providers always get a slot; ones with no
             # data yet (not logged in / fetch error) show a "–" placeholder.
-            segments = [
-                available.get(n, (n, None, ""))
-                for n in chosen if n in self._BAR_PROVIDERS
-            ]
-        else:
-            segments = [available[n] for n in self._BAR_PRIORITY
-                        if n in available][:2]
+            placeholder = {"pct": None, "resets_at": None, "tag": None, "suffix": ""}
+            return [seg for n in chosen if n in self._BAR_PROVIDERS
+                    for seg in available.get(n) or [{**placeholder, "name": n}]]
+        names = [n for n in self._BAR_PRIORITY if n in available][:2]
+        return [seg for n in names for seg in available[n]]
 
+    def _update_bar_title(self, data: UsageData):
+        segments = self._bar_segments(data)
         # Claude Code weekly messages
-        cc_msgs: int | None = None
-        if self._cc_stats:
-            cc_msgs = self._cc_stats.get("week_messages")
-
+        cc_msgs = self._cc_stats.get("week_messages") if self._cc_stats else None
         if segments:
             self._set_bar_title(segments, cc_msgs=cc_msgs)
         else:
             self.title = "\u25c6"
+        self._last_title_at = time.time()
+
+    def _apply(self, data: UsageData):
+        self._update_bar_title(data)
         self._rebuild_menu(data)
         # Refresh the floating panel if it's currently visible
         try:
@@ -2762,6 +2871,36 @@ class ClaudeBar(rumps.App):
 
         if self._last_data:
             self._apply(self._last_data)
+
+    def _make_claude_limit_cb(self, label: str):
+        def _cb(_sender):
+            with self._config_lock:
+                wanted = list(self.config.get("claude_bar_limits")
+                              or self.DEFAULT_CLAUDE_BAR_LIMITS)
+                if label in wanted:
+                    if len(wanted) == 1:
+                        return      # the Claude segment needs at least one limit
+                    wanted.remove(label)
+                else:
+                    wanted.append(label)
+                if wanted == self.DEFAULT_CLAUDE_BAR_LIMITS:
+                    self.config.pop("claude_bar_limits", None)
+                else:
+                    self.config["claude_bar_limits"] = wanted
+                save_config(self.config)
+            self._apply(self._last_data or UsageData())
+        return _cb
+
+    def _toggle_bar_reset(self, sender):
+        with self._config_lock:
+            on = not self.config.get("bar_show_reset")
+            if on:
+                self.config["bar_show_reset"] = True
+            else:
+                self.config.pop("bar_show_reset", None)
+            save_config(self.config)
+        sender._menuitem.setState_(1 if on else 0)
+        self._update_bar_title(self._last_data or UsageData())
 
     def _bar_reset_auto(self, _sender):
         """Reset bar display to auto-detect (top 2 active providers)."""

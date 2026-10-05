@@ -10,6 +10,12 @@ provider's usage API, and renders brand icon + percentage per provider in the me
 - `origin` = `CongjieHe/AIQuotaBar` (this fork; the auto-updater pulls `origin/main`),
   `upstream` = the original repo. The fork has diverged (renamed files, removed
   Copilot and the share/star UI), so upstream changes need manual porting.
+  Last reviewed against upstream 2.1.0 (`a81a7b1`, 2026-09-29). Ported: org uuid
+  (`e59d05e`), Claude limits in the bar (`cac0947`, extended to model-scoped
+  limits), severity colours + reset countdown and the single-instance lock (from
+  2.0), install.sh widget rebuild (`e3ed667`). Deliberately not taken: the 2.0
+  WebKit UI rewrite (it lacks most fixes below and still restarts via `execv`),
+  and the Activity Monitor rename (no effect for a non-framework Python).
 - Shown today: **Claude + Cursor**. ChatGPT is still supported in code but switched
   off via **Show Providers** (`disabled_providers`) — hide providers with that toggle,
   not by deleting display code. OpenAI / MiniMax / GLM are optional API-key providers.
@@ -90,14 +96,26 @@ auto-detect would silently re-add the provider on the next refresh.
 
 ## Key decisions to preserve
 
-- **Session (5-hour) drives Claude's menu bar number**, not the max of all limits.
-  Weekly limits appear in the menu/panel only. Session determines immediate access.
+- **Session (5-hour) drives Claude's menu bar number by default**, not the max of
+  all limits: it decides whether you can keep working right now. Status Bar →
+  Claude limits (`claude_bar_limits`, row labels like `5H`, `7D`, `7D Fable`) adds
+  more; several Claude segments share one icon and get tags (`5h`, `7d·F`).
+- **Menu bar percentages are severity-coloured** (orange ≥ `WARN_THRESHOLD`, red ≥
+  `CRIT_THRESHOLD`, otherwise the adaptive default). With `bar_show_reset`, a reset
+  < 24h away follows its percentage as a countdown, redrawn every 30s by `_flush_ui`
+  (`LimitRow.resets_at` carries the epoch timestamp for this).
 - **Firefox/LibreWolf first** in browser detection order — no Keychain prompt.
   Chromium browsers (Chrome, Arc, Brave, ...) come after; they need one-time "Always Allow".
 - **API utilization is 0–100 everywhere** (`five_hour`, `seven_day`, `seven_day_sonnet`,
   `limits[].percent`). No conversion needed.
-- **`rumps.notification` crashes** in dev (missing Info.plist CFBundleIdentifier).
-  All notifications go through `_notify()` which swallows the exception silently.
+- **`rumps.notification` fails without a bundle identifier**, which a venv/conda
+  Python never has. `_notify()` falls back to `osascript display notification`;
+  before that, every usage alert was silently dropped. Always call `_notify()`.
+- **One instance only.** `__main__._single_instance()` flocks `aiquotabar.lock`
+  (waiting up to 5s, since an updater restart briefly overlaps the old process);
+  a second copy exits 0 so launchd doesn't respawn it. install.sh starts the app
+  only through the LaunchAgent — launching a manual copy as well used to race
+  KeepAlive into two menu bar icons.
 - **Cookies are cached** in `config.json` (see Local files). Auto-detect runs when no
   cookie is saved and on repeated 401/403 failures to silently refresh the session.
 - **Cookie providers self-heal.** ChatGPT/Cursor swallow HTTP errors into
@@ -141,7 +159,7 @@ of a blank reset slot.
 |--------------------|---------------------------------------------------------------|
 | `aiquotabar.py`    | Entry point (imports `aiquotabar`)                            |
 | `aiquotabar/`      | Application package (see Architecture)                        |
-| `tests/`           | Updater regression tests (disposable git repos)               |
+| `tests/`           | Updater (disposable git repos), menu bar, parsing, lock tests |
 | `install.sh`       | One-line installer: clones this fork, venv, LaunchAgent, widget |
 | `make_launcher.sh` | Creates /Applications/AIQuota.app — headless launcher that restarts the menu bar app + reloads the widget (Spotlight: "AIQuota") |
 | `requirements.txt` | `rumps`, `curl_cffi`, `browser-cookie3`, `pyobjc-framework-Quartz` |
@@ -152,7 +170,8 @@ of a blank reset slot.
 
 Everything the app writes lives in `~/Library/Application Support/AIQuotaBar/`:
 `config.json` (settings + cached cookies), `aiquotabar.log` (+ `.1`–`.3`),
-`history.json`, `history.db`, `usage.json` (widget cache). The LaunchAgent is
+`history.json`, `history.db`, `usage.json` (widget cache), `aiquotabar.lock`
+(single-instance lock). The LaunchAgent is
 `com.aiquotabar`. Before the rename these were `~/.claude_bar_config.json`,
 `~/.claude_bar.log`, `~/.claude_bar_history.json` and `com.claudebar`;
 `_migrate_legacy_files()` moves the files on first import of `config.py`, and
