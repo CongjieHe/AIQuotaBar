@@ -9,7 +9,7 @@ from aiquotabar.config import (
     log, provider_disabled,
     WIDGET_HOST_APP, WIDGET_CACHE_DIR, WIDGET_CACHE_FILE,
 )
-from aiquotabar.providers import LimitRow, UsageData, ProviderData
+from aiquotabar.providers import LimitRow, UsageData, ProviderData, display_error
 
 
 def _write_widget_cache(
@@ -58,7 +58,7 @@ def _write_widget_cache(
         chatgpt_error = None
         if chatgpt_pd:
             if chatgpt_pd.error:
-                chatgpt_error = chatgpt_pd.error
+                chatgpt_error = display_error("ChatGPT", chatgpt_pd.error)
             else:
                 raw_rows = getattr(chatgpt_pd, "_rows", None) or []
                 chatgpt_rows = [_row_dict(r) for r in raw_rows]
@@ -69,7 +69,7 @@ def _write_widget_cache(
         cursor_error = None
         if cursor_pd:
             if cursor_pd.error:
-                cursor_error = cursor_pd.error
+                cursor_error = display_error("Cursor", cursor_pd.error)
             else:
                 raw_rows = getattr(cursor_pd, "_rows", None) or []
                 cursor_rows = [_row_dict(r) for r in raw_rows]
@@ -83,6 +83,7 @@ def _write_widget_cache(
                 "weekly_sonnet": _row_dict(data.weekly_sonnet),
                 "scoped": [_row_dict(r) for r in data.scoped],
                 "overages_enabled": data.overages_enabled,
+                "error": data.error,
             },
             "chatgpt": {
                 "rows": chatgpt_rows,

@@ -25,7 +25,7 @@ from aiquotabar.config import log
 class LimitRow:
     label: str
     pct: int          # 0–100
-    reset_str: str    # e.g. "resets in 1h 23m" or "resets Thu 00:00"
+    reset_str: str    # e.g. "resets in 1h 23m" or "resets in 1d 15h"
     resets_at: float | None = None   # epoch seconds, for the menu bar countdown
 
 
@@ -38,6 +38,7 @@ class UsageData:
     scoped: list[LimitRow] = field(default_factory=list)
     overages_enabled: bool | None = None
     raw: dict = field(default_factory=dict)
+    error: str | None = None   # why there are no rows (shown in their place)
 
 
 @dataclass
@@ -170,7 +171,16 @@ def fetch_raw(cookie_str: str) -> dict:
 
 # ── time helpers ──────────────────────────────────────────────────────────────
 
-_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+def fmt_left(secs: float) -> str:
+    """Time left, compact: 47m, 3h 28m, 1d 15h."""
+    secs = max(60, int(secs))
+    if secs < 3600:
+        return f"{secs // 60}m"
+    if secs < 86400:
+        h, m = divmod(secs // 60, 60)
+        return f"{h}h {m}m" if m else f"{h}h"
+    d, h = divmod(secs // 3600, 24)
+    return f"{d}d {h}h" if h else f"{d}d"
 
 
 def _parse_reset(val) -> datetime:
@@ -193,26 +203,19 @@ def _reset_ts(val) -> float | None:
 
 
 def _fmt_reset(val) -> str:
+    """Time left until a reset: 'resets in 3h 28m', 'resets in 1d 15h'.
+
+    Kept short on purpose: the medium widget gives it about 75pt. The menu and
+    panel add the weekday and local time for far-off resets (ui._reset_text).
+    """
     if val is None:
         return ""
     try:
-        dt = _parse_reset(val)
-        now = datetime.now(timezone.utc)
-        delta = dt - now
-        secs = delta.total_seconds()
-        if secs <= 0:
-            return "resets soon"
-        if secs < 3600 * 20:
-            h, rem = divmod(int(secs), 3600)
-            m = rem // 60
-            if h > 0:
-                return f"resets in {h}h {m}m"
-            return f"resets in {m}m"
-        day = _DAYS[dt.weekday()]
-        return f"resets {day} {dt.strftime('%H:%M')}"
+        secs = (_parse_reset(val) - datetime.now(timezone.utc)).total_seconds()
     except Exception:
         log.debug("_fmt_reset failed for %r", val, exc_info=True)
         return str(val)[:20]
+    return f"resets in {fmt_left(secs)}" if secs > 0 else "resets soon"
 
 
 # ── parser ────────────────────────────────────────────────────────────────────
@@ -481,14 +484,9 @@ def fetch_cursor(cookie_str: str) -> ProviderData:
             try:
                 end_dt = datetime.fromisoformat(cycle_end.replace("Z", "+00:00"))
                 reset_ts = end_dt.timestamp()
-                delta = end_dt - datetime.now(timezone.utc)
-                if delta.total_seconds() > 0:
-                    days = delta.days
-                    hours = delta.seconds // 3600
-                    if days > 0:
-                        reset_str = f"resets in {days}d {hours}h"
-                    else:
-                        reset_str = f"resets in {hours}h"
+                left = (end_dt - datetime.now(timezone.utc)).total_seconds()
+                if left > 0:
+                    reset_str = f"resets in {fmt_left(left)}"
             except (ValueError, TypeError):
                 pass
         if plan:
@@ -548,6 +546,16 @@ def is_auth_error(err: str | None) -> bool:
     low = err.lower()
     return ("401" in low or "403" in low or "not logged in" in low
             or "unauthor" in low or "forbidden" in low)
+
+
+_SITES = {"Claude": "claude.ai", "ChatGPT": "chatgpt.com", "Cursor": "cursor.com"}
+
+
+def display_error(name: str, err: str) -> str:
+    """User-facing text for a provider error (menu, panel and widget)."""
+    if is_auth_error(err):
+        return f"Session expired \u2014 sign in at {_SITES.get(name, name)}"
+    return err
 
 
 # ── Claude Code local stats ───────────────────────────────────────────────────

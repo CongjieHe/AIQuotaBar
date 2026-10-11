@@ -126,7 +126,7 @@ extension AIProvider {
             return ProviderDisplayData(
                 mainPct: session?.pct ?? 0,
                 rows: rows,
-                error: nil,
+                error: rows.isEmpty ? snap.claude.error : nil,
                 extraInfo: extra,
                 isConfigured: true
             )

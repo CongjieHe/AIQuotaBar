@@ -18,7 +18,8 @@ struct QuotaEntry: TimelineEntry {
                 weeklyAll: LimitRow(label: "7D", pct: 83, resetStr: "resets Wed 23:00"),
                 weeklySonnet: nil,
                 scoped: nil,
-                overagesEnabled: false
+                overagesEnabled: false,
+                error: nil
             ),
             chatgpt: ChatGPTUsage(
                 rows: [LimitRow(label: "7D", pct: 12, resetStr: "resets Thu 05:38")],

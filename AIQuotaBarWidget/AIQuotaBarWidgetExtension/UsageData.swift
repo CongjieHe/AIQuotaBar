@@ -47,9 +47,12 @@ struct ClaudeUsage: Codable {
     /// written before the app learned about `limits[]` simply omit the key.
     let scoped: [LimitRow]?
     let overagesEnabled: Bool?
+    /// Why there are no rows (e.g. "Unreachable since 14:10 (timed out)").
+    /// Optional: caches written before the app reported errors omit it.
+    let error: String?
 
     enum CodingKeys: String, CodingKey {
-        case session, scoped
+        case session, scoped, error
         case weeklyAll = "weekly_all"
         case weeklySonnet = "weekly_sonnet"
         case overagesEnabled = "overages_enabled"

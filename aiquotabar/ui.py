@@ -4,6 +4,7 @@ import rumps
 import atexit
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -15,7 +16,7 @@ from aiquotabar.config import (
     log, load_config, save_config, notif_enabled, set_notif,
     provider_disabled, set_provider_disabled,
     REFRESH_INTERVALS, DEFAULT_REFRESH,
-    WARN_THRESHOLD, CRIT_THRESHOLD, PACING_ALERT_MINUTES,
+    WARN_THRESHOLD, CRIT_THRESHOLD, PACING_ALERT_MINUTES, RETRY_INTERVAL, RETRY_LIMIT,
     UPDATE_CHECK_INTERVAL, LOG_FILE,
     LAUNCH_AGENT_LABEL, LAUNCH_AGENT_PLIST,
     LEGACY_LAUNCH_AGENT_LABEL, LEGACY_LAUNCH_AGENT_PLIST,
@@ -23,7 +24,7 @@ from aiquotabar.config import (
 from aiquotabar.providers import (
     LimitRow, UsageData, ProviderData, parse_usage, fetch_raw,
     fetch_claude_code_stats, PROVIDER_REGISTRY, COOKIE_PROVIDERS,
-    CurlHTTPError, is_auth_error,
+    CurlHTTPError, is_auth_error, display_error, fmt_left,
     _auto_detect_cookies, _auto_detect_chatgpt_cookies,
     _auto_detect_cursor_cookies,
     _BROWSER_COOKIE3_OK,
@@ -576,13 +577,64 @@ def _severity(pct: int | None) -> str | None:
     return None
 
 
-def _fmt_countdown(secs: float) -> str:
-    """Compact time left for the menu bar: 47m, 4h 8m."""
-    h, rem = divmod(max(60, int(secs)), 3600)
-    m = rem // 60
-    if not h:
-        return f"{m}m"
-    return f"{h}h {m}m" if m else f"{h}h"
+def _reset_text(row: LimitRow) -> str:
+    """A row's reset, computed now from its timestamp (so it stays right between
+    fetches): 'resets in 3h 28m', or 'resets in 1d 15h · Fri 04:00' (local
+    time) when the reset is more than a day away."""
+    if row.resets_at is None:
+        return row.reset_str
+    # The API jitters a reset by up to a second around the minute (02:00:00.44,
+    # 01:59:59.97): round, or one window prints as 10:00 and 09:59.
+    ts = round(row.resets_at / 60) * 60
+    left = ts - time.time()
+    if left <= 0:
+        return "resets soon"
+    text = f"resets in {fmt_left(left)}"
+    if left >= 86400:
+        text += datetime.fromtimestamp(ts).strftime(" \u00b7 %a %H:%M")
+    return text
+
+
+def _shared_resets(rows: list[LimitRow]) -> list[tuple[LimitRow, str | None]]:
+    """Pair each row with the reset text to print after it.
+
+    Rows resetting in the same minute share one line, after the last of them:
+    Claude's 7D and per-model weekly caps have run on one weekly window so far
+    (within ~1s), but nothing guarantees it, so differing resets stay separate.
+    The text is None for rows whose group continues below.
+    """
+    def key(r: LimitRow):
+        return round(r.resets_at / 60) if r.resets_at is not None else r.reset_str
+
+    groups: dict = {}
+    for r in rows:
+        groups.setdefault(key(r), []).append(r)
+    out: list[tuple[LimitRow, str | None]] = []
+    for r in rows:
+        group = groups[key(r)]
+        if r is not group[-1]:
+            out.append((r, None))
+            continue
+        text = _reset_text(r)
+        if len(group) > 1 and text:
+            text = " & ".join(g.label for g in group) + ": " + text
+        out.append((r, text))
+    return out
+
+
+def _short_reason(err: str) -> str:
+    """'curl: (28) Operation timed out after 10002 ms...' -> 'timed out'."""
+    low = err.lower()
+    for needle, reason in (("timed out", "timed out"),
+                           ("resolve host", "DNS lookup failed"),
+                           ("connect to", "connection failed"),
+                           ("ssl", "TLS error")):
+        if needle in low:
+            return reason
+    code = re.search(r"http error (\d{3})", low)
+    if code:
+        return f"HTTP {code.group(1)}"
+    return err.split(". See ")[0][:40]
 
 
 def _fmt_count(n: int) -> str:
@@ -597,17 +649,18 @@ def _bar(pct: int, width: int = 14) -> str:
     return "\u2588" * filled + "\u2591" * (width - filled)
 
 
-def _row_lines(row: LimitRow) -> list[str]:
+def _row_lines(row: LimitRow, with_reset: bool = True) -> list[str]:
     bar = _bar(row.pct)
     line1 = f"  {row.label}  {row.pct}%"
-    line2 = f"  {bar}  {row.reset_str}" if row.reset_str else f"  {bar}"
+    reset = _reset_text(row) if with_reset else ""
+    line2 = f"  {bar}  {reset}" if reset else f"  {bar}"
     return [line1, line2]
 
 
 def _provider_lines(pd: ProviderData) -> list[str]:
     sym = "\u00a5" if pd.currency == "CNY" else ("" if pd.currency == "" else "$")
     if pd.error:
-        return [f"  \u26a0\ufe0f  {pd.error[:60]}"]
+        return [f"  \u26a0\ufe0f  {display_error(pd.name, pd.error)[:60]}"]
     # ChatGPT multi-row format (stored in pd._rows by _parse_wham_usage)
     rows = getattr(pd, "_rows", None)
     if rows:
@@ -1190,16 +1243,20 @@ class _UsagePanel:
         # Claude section
         if data and any([data.session, data.weekly_all, data.weekly_sonnet, *data.scoped]):
             has_any_data = True
-            # Provider header: dot + name + reset time
-            elements.append(('provider_header', y, 18, 'Claude', '#D97757',
-                             data.session.reset_str if data.session else ''))
+            # Provider header: dot + name
+            elements.append(('provider_header', y, 18, 'Claude', '#D97757', ''))
             y += 18 + 6
 
-            # Rows
-            for row in [data.session, data.weekly_all, data.weekly_sonnet, *data.scoped]:
-                if row:
-                    elements.append(('limit_row', y, 20, row, '#D97757'))
-                    y += 20 + self.ROW_GAP
+            # Rows. Each reset sits under its own row; limits that reset in the
+            # same minute (7D and the per-model caps) share one line under the last.
+            rows = [r for r in (data.session, data.weekly_all, data.weekly_sonnet, *data.scoped)
+                    if r]
+            for row, reset in _shared_resets(rows):
+                elements.append(('limit_row', y, 20, row, '#D97757'))
+                y += 20 + self.ROW_GAP
+                if reset:
+                    elements.append(('reset_line', y, 14, reset))
+                    y += 14 + 2
 
             # ETA
             eta = _calc_eta_minutes(history, "claude")
@@ -1223,10 +1280,17 @@ class _UsagePanel:
                 y += 14 + 2
 
             y += self.SECTION_GAP
+        elif data and data.error:
+            has_any_data = True
+            y = self._error_section(elements, y, 'Claude', '#D97757', data.error)
 
         # ChatGPT section
         chatgpt_pd = next((pd for pd in provider_data if pd.name == "ChatGPT"), None)
-        if chatgpt_pd and not chatgpt_pd.error:
+        if chatgpt_pd and chatgpt_pd.error:
+            has_any_data = True
+            y = self._error_section(elements, y, 'ChatGPT', '#74AA9C',
+                                    display_error('ChatGPT', chatgpt_pd.error))
+        elif chatgpt_pd:
             has_any_data = True
             rows = getattr(chatgpt_pd, "_rows", None) or []
             reset_str = rows[0].reset_str if rows else ""
@@ -1244,7 +1308,11 @@ class _UsagePanel:
 
         # Cursor section
         cursor_pd = next((pd for pd in provider_data if pd.name == "Cursor"), None)
-        if cursor_pd and not cursor_pd.error:
+        if cursor_pd and cursor_pd.error:
+            has_any_data = True
+            y = self._error_section(elements, y, 'Cursor', '#00A0D1',
+                                    display_error('Cursor', cursor_pd.error))
+        elif cursor_pd:
             has_any_data = True
             rows = getattr(cursor_pd, "_rows", None) or []
             reset_str = rows[0].reset_str if rows else ""
@@ -1340,6 +1408,22 @@ class _UsagePanel:
                     doc, PAD, real_y, inner, h,
                     f"Hit limit {hit_count}x this week",
                     NSTextField, NSFont, NSColor, NSMakeRect,
+                )
+
+            elif kind == 'reset_line':
+                _, _, _, text = elem
+                self._render_small_text(
+                    doc, PAD, real_y, inner, h, f"\u21bb {text}",
+                    NSTextField, NSFont, NSColor, NSMakeRect,
+                )
+
+            elif kind == 'error_line':
+                _, _, _, message = elem
+                self._render_small_text(
+                    doc, PAD, real_y, inner, h,
+                    f"\u26a0\ufe0e {message}",
+                    NSTextField, NSFont, NSColor, NSMakeRect,
+                    size=11,
                 )
 
             elif kind == 'placeholder':
@@ -1499,6 +1583,14 @@ class _UsagePanel:
         pct_lbl.setTextColor_(NSColor.labelColor())
         parent.addSubview_(pct_lbl)
 
+    def _error_section(self, elements: list, y: int, name: str, color: str,
+                       message: str) -> int:
+        """Provider header plus its error message, in place of the limit rows."""
+        elements.append(('provider_header', y, 18, name, color, ''))
+        y += 18 + 6
+        elements.append(('error_line', y, 16, message))
+        return y + 16 + self.SECTION_GAP
+
     def _render_small_text(self, parent, x, y, w, h, text,
                            NSTextField, NSFont, NSColor, NSMakeRect,
                            size=10, weight=0.0):
@@ -1557,6 +1649,13 @@ class ClaudeBar(rumps.App):
         self._prev_pcts: dict[str, int] = {}  # previous pct per row key (reset detection)
         self._auth_fail_count = 0
         self._cookie_redetect_at: dict[str, float] = {}  # cfg_key -> last re-detect ts
+        # Network outages by source ("claude" or a provider cfg_key): the last
+        # good data stays up, the source is retried every RETRY_INTERVAL, and
+        # its error shows once RETRY_LIMIT retries failed (see _outage_*).
+        self._outages: dict[str, dict] = {}
+        self._last_good: dict[str, ProviderData] = {}
+        self._stale_providers: set[str] = set()   # names showing last good data
+        self._force_retry = False                 # Refresh Now skips the wait
         self._fetching = False
         self._last_updated: datetime | None = None
         # When _update_bar_title last drew the bar; None while a plain status
@@ -1628,7 +1727,10 @@ class ClaudeBar(rumps.App):
 
         if data is None or not any([data.session, data.weekly_all, data.weekly_sonnet,
                                     *(data.scoped if data else [])]):
-            items.append(_mi("  No data \u2014 click Auto-detect from Browser"))
+            if data is not None and data.error:
+                items.append(_mi(f"  \u26a0\ufe0f  {data.error}"))
+            else:
+                items.append(_mi("  No data \u2014 click Auto-detect from Browser"))
         else:
             if data.session:
                 lines = _row_lines(data.session)
@@ -1650,11 +1752,14 @@ class ClaudeBar(rumps.App):
                     items.append(_mi(f"  Hit limit {hits}x this week"))
                 items.append(None)
 
-            for row in [data.weekly_all, data.weekly_sonnet, *data.scoped]:
-                if row:
-                    lines = _row_lines(row)
-                    items.append(_mi(lines[0]))
-                    items.append(_colored_mi(lines[1], "#D97757"))
+            weekly = [r for r in (data.weekly_all, data.weekly_sonnet, *data.scoped) if r]
+            for row, reset in _shared_resets(weekly):
+                lines = _row_lines(row, with_reset=False)
+                items.append(_mi(lines[0]))
+                items.append(_colored_mi(lines[1], "#D97757"))
+                if reset is not None:       # end of a same-reset group
+                    if reset:
+                        items.append(_mi(f"  \u21bb {reset}"))
                     items.append(None)
 
 
@@ -2087,14 +2192,17 @@ class ClaudeBar(rumps.App):
             self._fetching = True
         threading.Thread(target=self._fetch_and_update, daemon=True).start()
 
-    def _fetch_claude(self) -> UsageData:
+    def _fetch_claude(self, force: bool = False) -> UsageData:
         """Fetch Claude usage without ever raising.
 
         A Claude failure must not block the other providers, the bar or the
-        widget. Network errors (claude.ai timeouts are common) keep the last
-        good snapshot so the bar doesn't flicker; auth errors drop it, and on
-        repeated 401/403 fresh cookies are re-read from the browser.
+        widget. Network errors follow the outage policy (last good data, retry
+        every RETRY_INTERVAL); auth errors drop the data, and on repeated
+        401/403 fresh cookies are re-read from the browser.
         """
+        now = time.time()
+        if self._outage_waiting("claude", now, force):
+            return self._claude_outage_data()
         try:
             with self._config_lock:
                 sk = self.config.get("cookie_str")
@@ -2111,7 +2219,9 @@ class ClaudeBar(rumps.App):
             code = getattr(resp, "status_code", 0) or 0
             log.warning("Claude fetch failed (status=%s): %s", code, e)
             if code not in (401, 403):
-                return self._last_data or UsageData()
+                self._outage_failed("claude", str(e), now, force)
+                return self._claude_outage_data()
+            self._outages.pop("claude", None)
             self._auth_fail_count += 1
             if self._auth_fail_count < 2:
                 return UsageData()
@@ -2125,7 +2235,7 @@ class ClaudeBar(rumps.App):
                     "Session expired \u2014 please update your cookie",
                     "Click: Set Session Cookie\u2026 or Auto-detect from Browser",
                 )
-                return UsageData()
+                return UsageData(error=display_error("Claude", f"HTTP {code}"))
             with self._config_lock:
                 self.config["cookie_str"] = cookie_str
                 save_config(self.config)
@@ -2136,10 +2246,12 @@ class ClaudeBar(rumps.App):
             except Exception:
                 log.exception("Claude re-fetch after cookie re-detect failed")
                 return UsageData()
-        except Exception:
+        except Exception as e:
             log.exception("Claude fetch failed")
-            return self._last_data or UsageData()
+            self._outage_failed("claude", str(e), now, force)
+            return self._claude_outage_data()
 
+        self._outages.pop("claude", None)
         self._last_raw = raw
         self._auth_fail_count = 0
         data = parse_usage(raw)
@@ -2147,24 +2259,65 @@ class ClaudeBar(rumps.App):
         self._check_warnings(data)
         return data
 
+    def _claude_outage_data(self) -> UsageData:
+        """During a network outage: the last good data until it is reported."""
+        if self._claude_rows(self._last_data) and not self._outage_reported("claude"):
+            return self._last_data
+        return UsageData(error=self._outage_message("claude"))
+
+    # -- network outages --------------------------------------------------------
+
+    def _outage_waiting(self, key: str, now: float, force: bool) -> bool:
+        """True while `key` waits for its next retry after a network error."""
+        o = self._outages.get(key)
+        # A minute of slack, so the timer tick at the retry mark isn't skipped.
+        return bool(o) and not force and now < o["next_try"] - 60
+
+    def _outage_failed(self, key: str, err: str, now: float, force: bool):
+        """Count a failed attempt. A manual Refresh Now doesn't use up a retry."""
+        o = self._outages.get(key)
+        if o is None:
+            self._outages[key] = {"since": now, "retries": 0,
+                                  "next_try": now + RETRY_INTERVAL, "error": err}
+            log.info("%s unreachable (%s); retrying every %d min",
+                     key, err, RETRY_INTERVAL // 60)
+            return
+        o["error"] = err
+        if not force:
+            o["retries"] += 1
+            o["next_try"] = now + RETRY_INTERVAL
+
+    def _outage_reported(self, key: str) -> bool:
+        return self._outages[key]["retries"] >= RETRY_LIMIT
+
+    def _outage_message(self, key: str) -> str:
+        o = self._outages[key]
+        since = datetime.fromtimestamp(o["since"])
+        fmt = "%H:%M" if since.date() == datetime.now().date() else "%b %d %H:%M"
+        return f"Unreachable since {since.strftime(fmt)} ({_short_reason(o['error'])})"
+
     def _fetch_and_update(self):
 
         try:
-            data = self._fetch_claude()
+            force, self._force_retry = self._force_retry, False
+            data = self._fetch_claude(force)
+            claude_fresh = data is not self._last_data
             self._last_data = data
             self._last_updated = datetime.now()
-            self._fetch_providers()
+            self._fetch_providers(force)
             self._check_provider_warnings(self._provider_data)
             self._cc_stats = fetch_claude_code_stats()
 
-            # -- record usage history --
-            if data.session:
+            # -- record usage history (fresh samples only) --
+            fresh = [p for p in self._provider_data
+                     if not p.error and p.name not in self._stale_providers]
+            if claude_fresh and data.session:
                 _append_history(self._history, "claude", data.session.pct)
             # Per-row history for multi-limit providers (avoids mixing
             # different limit types which made ETAs jump around).
             for prefix, pname in [("chatgpt", "ChatGPT"), ("cursor", "Cursor")]:
-                pd = next((p for p in self._provider_data if p.name == pname), None)
-                if pd and not pd.error:
+                pd = next((p for p in fresh if p.name == pname), None)
+                if pd:
                     rows = getattr(pd, "_rows", None)
                     if rows:
                         for row in rows:
@@ -2175,11 +2328,11 @@ class ClaudeBar(rumps.App):
             # -- record to SQLite history --
             try:
                 with self._db_lock:
-                    if data.session:
+                    if claude_fresh and data.session:
                         _record_sample(self._history_db, "claude", data.session.pct)
                     for prefix, pname in [("chatgpt", "ChatGPT"), ("cursor", "Cursor")]:
-                        pd = next((p for p in self._provider_data if p.name == pname), None)
-                        if pd and not pd.error:
+                        pd = next((p for p in fresh if p.name == pname), None)
+                        if pd:
                             rows = getattr(pd, "_rows", None)
                             if rows:
                                 for row in rows:
@@ -2373,7 +2526,7 @@ class ClaudeBar(rumps.App):
             ts = seg.get("resets_at")
             if not show_reset or ts is None or not 0 < ts - now < 86400:
                 return ""
-            return _fmt_countdown(ts - now)
+            return fmt_left(ts - now)
 
         try:
             from AppKit import (NSColor, NSFont,
@@ -2601,7 +2754,7 @@ class ClaudeBar(rumps.App):
         log.info("re-detected %s cookies from browser", cfg_key)
         return ck
 
-    def _fetch_providers(self):
+    def _fetch_providers(self, force: bool = False):
         """Fetch all configured third-party API providers (sync, called from fetch thread)."""
         # Auto-detect cookies for providers we have nothing saved for yet
         for cfg_key in COOKIE_PROVIDERS:
@@ -2623,25 +2776,29 @@ class ClaudeBar(rumps.App):
                 k: (None if provider_disabled(self.config, k) else self.config.get(k))
                 for k in PROVIDER_REGISTRY
             }
-        tasks = []
+        now = time.time()
+        active, tasks = [], []
         for cfg_key, (name, fetch_fn) in PROVIDER_REGISTRY.items():
             key = keys_snapshot.get(cfg_key)
-            if key:
+            if not key:
+                continue
+            active.append(cfg_key)
+            if not self._outage_waiting(cfg_key, now, force):
                 tasks.append((cfg_key, fetch_fn, key))
-        if not tasks:
-            self._provider_data = []
-            return
+        for k in [k for k in self._outages if k != "claude" and k not in active]:
+            del self._outages[k]
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
         results: dict[str, ProviderData] = {}
-        with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
-            futures = {pool.submit(fn, k): cfg_key for cfg_key, fn, k in tasks}
-            for future in as_completed(futures):
-                cfg_key = futures[future]
-                try:
-                    results[cfg_key] = future.result()
-                except Exception:
-                    log.exception("provider fetch failed")
+        if tasks:
+            with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+                futures = {pool.submit(fn, k): cfg_key for cfg_key, fn, k in tasks}
+                for future in as_completed(futures):
+                    cfg_key = futures[future]
+                    try:
+                        results[cfg_key] = future.result()
+                    except Exception:
+                        log.exception("provider fetch failed")
 
         # Session expired? Cached cookies go stale long before the user notices
         # -- the provider just vanishes from the bar. Re-read them from the
@@ -2664,11 +2821,41 @@ class ClaudeBar(rumps.App):
                 log.info("%s recovered after cookie re-detect", cfg_key)
             results[cfg_key] = pd
 
-        self._provider_data = list(results.values())
+        # cursor.com / chatgpt.com time out a few times a day. A network error
+        # keeps the last good data up and retries every RETRY_INTERVAL; the
+        # error only shows once RETRY_LIMIT retries failed. A dead session
+        # (auth error) shows at once.
+        shown: list[ProviderData] = []
+        stale: set[str] = set()
+        for cfg_key in active:
+            pd = results.get(cfg_key)
+            if pd is not None and (not pd.error or is_auth_error(pd.error)):
+                self._outages.pop(cfg_key, None)
+                if pd.error:
+                    self._last_good.pop(cfg_key, None)
+                else:
+                    self._last_good[cfg_key] = pd
+                shown.append(pd)
+                continue
+            if pd is not None:
+                self._outage_failed(cfg_key, pd.error, now, force)
+            elif cfg_key not in self._outages:
+                continue        # the fetch raised; already logged
+            prev = self._last_good.get(cfg_key)
+            if prev is not None and not self._outage_reported(cfg_key):
+                shown.append(prev)
+                stale.add(prev.name)
+            else:
+                shown.append(ProviderData(PROVIDER_REGISTRY[cfg_key][0],
+                                          error=self._outage_message(cfg_key)))
+        self._stale_providers = stale
+        self._provider_data = shown
 
     # -- callbacks ------------------------------------------------------------
 
     def _do_refresh(self, _sender):
+        # A manual refresh retries sources waiting out a network outage now.
+        self._force_retry = True
         self._schedule_fetch()
 
     def _open_usage_page(self, _sender):

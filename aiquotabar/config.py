@@ -73,6 +73,10 @@ DEFAULT_REFRESH = 300
 
 WARN_THRESHOLD = 80   # notify when any limit crosses this %
 CRIT_THRESHOLD = 95   # title turns red emoji above this %
+# After a network error a source keeps its last good data and is retried every
+# RETRY_INTERVAL; the error is shown once RETRY_LIMIT retries failed (1 hour).
+RETRY_INTERVAL = 15 * 60
+RETRY_LIMIT = 4
 
 WIDGET_HOST_APP = "/Applications/AIQuotaBarHost.app"
 WIDGET_CACHE_DIR = APP_SUPPORT_DIR

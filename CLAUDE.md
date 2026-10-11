@@ -39,8 +39,8 @@ aiquotabar/
 
 Claude is not in `PROVIDER_REGISTRY`: it has its own fetch (`_fetch_claude`) and
 always shows when it returns rows. It must never block the other providers — a
-network error keeps the last snapshot, repeated 401/403 re-detects browser cookies
-and retries once.
+network error follows the outage policy below, repeated 401/403 re-detects browser
+cookies and retries once.
 
 Note: Cursor's `usage-summary` API has two response shapes — individual plans return
 `individualUsage.plan.*PercentUsed`; enterprise/team plans have no `plan` block and
@@ -104,6 +104,17 @@ auto-detect would silently re-add the provider on the next refresh.
   `CRIT_THRESHOLD`, otherwise the adaptive default). With `bar_show_reset`, a reset
   < 24h away follows its percentage as a countdown, redrawn every 30s by `_flush_ui`
   (`LimitRow.resets_at` carries the epoch timestamp for this).
+- **Reset texts are time left.** `reset_str` stays short ("resets in 1d 7h") because
+  the medium widget gives it ~75pt. The menu and panel render `_reset_text(row)`
+  from `resets_at` at draw time, adding the local weekday/time for resets more than
+  a day out ("resets in 1d 7h · Fri 10:00"). In the panel every Claude row, 5H
+  included, gets its reset as a line under its bar — not beside the "Claude" title. Never format API timestamps without converting to
+  local time — the old "resets Fri 02:00" was UTC. `_reset_text` rounds to the
+  minute: the API jitters `seven_day.resets_at` by up to ~1s (01:59:59.97).
+- **Weekly rows that reset in the same minute share one reset line**
+  (`_shared_resets`, "7D & 7D Fable: resets in …"). 7D and the per-model caps ran
+  on one window in every response logged (612 over 2026-10-03..08, max gap 1.006s),
+  but the API doesn't promise it, so rows with different resets keep their own line.
 - **Firefox/LibreWolf first** in browser detection order — no Keychain prompt.
   Chromium browsers (Chrome, Arc, Brave, ...) come after; they need one-time "Always Allow".
 - **API utilization is 0–100 everywhere** (`five_hour`, `seven_day`, `seven_day_sonnet`,
@@ -118,6 +129,15 @@ auto-detect would silently re-add the provider on the next refresh.
   KeepAlive into two menu bar icons.
 - **Cookies are cached** in `config.json` (see Local files). Auto-detect runs when no
   cookie is saved and on repeated 401/403 failures to silently refresh the session.
+- **Network outages don't blank the display.** Any non-auth error (timeout, DNS,
+  5xx — cursor.com times out a few times a day) keeps the source's last good data
+  up and retries it every `RETRY_INTERVAL` (15 min) instead of every refresh.
+  After `RETRY_LIMIT` (4) failed retries — 1 hour down — the menu, panel and widget
+  show "Unreachable since HH:MM (reason)" in its place (`_outage_*` in `ui.py`,
+  `UsageData.error` for Claude). With no earlier data the message shows at once.
+  Refresh Now retries immediately without using up a retry. Reused data is not
+  written to history (it would add a fake flat stretch to burn rate / ETA).
+  Auth errors skip all this and show at once (`display_error`).
 - **Cookie providers self-heal.** ChatGPT/Cursor swallow HTTP errors into
   `ProviderData.error`, so `_fetch_providers` checks `is_auth_error()` and re-runs
   browser detection + one retry (15-min per-provider cooldown, `_redetect_cookies`).
